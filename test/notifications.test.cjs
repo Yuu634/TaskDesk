@@ -3,6 +3,76 @@ const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path'), crypto = require('node:crypto');
 const { handle, notify, activity, verifyJob, atomic, configNotify } = require('../lib/codex-notify.cjs');
 const { transportFor } = require('../lib/notification-transport.cjs');
+const { assessJob, judgeOutcome } = require('../lib/codex-notify.cjs');
+const { assessInTerminal } = require('../lib/codex-notify.cjs');
+test('startup prompt is a literal positional argument after configuration and acknowledgement', async t => {
+  t.mock.method(os, 'userInfo', () => ({ username: 'fixture-user' }));
+  const s = setup(), fixture = path.join(s.dir, 'config.cjs');
+  fs.writeFileSync(fixture, "require('readline').createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.id)console.log(JSON.stringify({id:r.id,result:r.id===2?{config:{notify:[]}}:{}}));});");
+  const cwd = fs.realpathSync(process.cwd());
+  atomic(path.join(s.dir, 'context.json'), { ...s.c, hostname: os.hostname(), user: os.userInfo().username, cwd: process.platform === 'win32' ? cwd.toLowerCase() : cwd, startupPrompt: true });
+  const prompt = '--help $(literal) `literal` 日本語\nsecond line';
+  fs.writeFileSync(path.join(s.dir, 'work-prompt.txt'), prompt);
+  atomic(path.join(s.dir, 'ack-ready.json'), { token: s.token });
+  const args = await require('../lib/codex-notify.cjs').configure(s.dir, s.token, { command: process.execPath, prefix: [fixture] }, ['--sandbox', 'read-only'], process.env);
+  assert.deepEqual(args.slice(-2), ['--', prompt]);
+  assert.equal(args.filter(a => a === prompt).length, 1);
+});
+
+test('assessment request only queues a same-terminal handoff, and rejects stale/repeated foreign turns', async () => {
+  const s = setup(); await notify(s.dir, s.token, s.raw); const feed = await s.request('collect');
+  const job = { event: feed.events[0], fingerprint: feed.activity.fingerprint, criteria: '' };
+  await s.request('assess', job); await s.request('assess', job);
+  assert(fs.existsSync(path.join(s.dir, 'terminal-assessment.json')));
+  assert.equal((await s.request('collect')).assessment, null);
+  assert.equal(await assessInTerminal(s.dir, s.token, 0), true);
+  assert.equal((await s.request('collect')).assessment.outcome, 'needs_review');
+  await assert.rejects(s.request('assess', { ...job, fingerprint: 'stale' }), /変わり/);
+});
+
+for (const scenario of ['new-turn', 'cancelled', 'nonzero']) test('same-tab handoff never evaluates unsafe exit: ' + scenario, async () => {
+  const s = setup(); await notify(s.dir, s.token, s.raw); const feed = await s.request('collect');
+  await s.request('assess', { event: feed.events[0], fingerprint: feed.activity.fingerprint, criteria: '条件' });
+  if (scenario === 'new-turn') fs.appendFileSync(s.file, JSON.stringify({ type: 'event_msg', payload: { type: 'task_started', turn_id: 'new' } }) + '\n');
+  if (scenario === 'cancelled') await s.request('cancel');
+  await assessInTerminal(s.dir, s.token, scenario === 'nonzero' ? 1 : 0);
+  const result = (await s.request('collect')).assessment;
+  assert.equal(result.outcome, 'needs_review'); assert.match(result.detail, /開始しませんでした/);
+  assert(!fs.existsSync(path.join(s.dir, 'assessment-schema.json')));
+});
+
+test('AI completion requires exact coverage, evidence and successful optional verification', () => {
+  const good = { criteria: [{ id: 1, status: 'met', evidence: 'file.js:12' }] };
+  assert.equal(judgeOutcome(good, '条件'), 'completed');
+  for (const bad of [null, { criteria: [] }, { criteria: [{ id: 2, status: 'met', evidence: 'x' }] }, { criteria: [{ id: 1, status: 'unknown', evidence: '不明' }] }, { criteria: [{ id: 1, status: 'met', evidence: '' }] }]) assert.equal(judgeOutcome(bad, '条件'), 'needs_review');
+  assert.equal(judgeOutcome(good, ''), 'needs_review');
+  assert.equal(judgeOutcome(good, '条件\n別条件'), 'needs_review');
+  assert.equal(judgeOutcome(good, '条件', { outcome: 'unexpected' }), 'needs_review');
+});
+
+for (const scenario of ['met', 'unknown', 'unmet', 'malformed', 'failed', 'missing', 'verification-failed']) test('independent assessment: ' + scenario, async () => {
+  const s = setup(); await notify(s.dir, s.token, s.raw);
+  const feed = await s.request('collect');
+  const fixture = path.join(s.dir, 'judge.cjs');
+  fs.writeFileSync(fixture, `const fs=require('fs'); const args=process.argv.slice(2);
+    if(args[0]==='app-server') { require('readline').createInterface({input:process.stdin}).on('line',line=>{ const r=JSON.parse(line); if(r.id) console.log(JSON.stringify({id:r.id,result:r.id===2?{config:{mcp_servers:{example:{}}}}:{}})); }); }
+    else { let input='';process.stdin.on('data',s=>input+=s);process.stdin.on('end',()=>{
+      fs.writeFileSync(${JSON.stringify(path.join(s.dir, 'capture.json'))},JSON.stringify({args,input}));
+      if(${JSON.stringify(scenario)}==='failed') return process.exit(1);
+      fs.writeFileSync(args[args.indexOf('--output-last-message')+1], ${JSON.stringify(scenario === 'malformed' ? 'bad json' : JSON.stringify({ criteria: [{ id: 1, status: ['unknown', 'unmet'].includes(scenario) ? scenario : 'met', evidence: 'artifact.txt:1 を確認' }] }))});
+    }); }`);
+  const launch = JSON.parse(fs.readFileSync(path.join(s.dir, 'launch.json')));
+  atomic(path.join(s.dir, 'launch.json'), { ...launch, resolved: { command: process.execPath, prefix: [fixture] } });
+  await assessJob(s.dir, s.token, { event: feed.events[0], fingerprint: feed.activity.fingerprint, criteria: scenario === 'missing' ? '' : '成果物がある', prompt: '作業指示', ...(scenario === 'verification-failed' ? { verification: { autoComplete: true, command: 'node', args: ['-e', 'process.exit(1)'], timeoutSeconds: 5 } } : {}) });
+  const result = (await s.request('collect')).assessment;
+  assert.equal(result.outcome, scenario === 'met' ? 'completed' : 'needs_review');
+  assert.equal(result.after.fingerprint, feed.activity.fingerprint);
+  if (scenario !== 'missing') {
+    const { args, input } = JSON.parse(fs.readFileSync(path.join(s.dir, 'capture.json')));
+    assert(args.includes('read-only')); assert(args.includes('notify=[]')); assert(args.includes('mcp_servers.example.enabled=false'));
+    assert(input.includes('作業指示')); assert(input.includes('普通の回答')); assert(input.includes('成果物がある'));
+  }
+});
 function setup() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'taskdesk-notify-')), token = crypto.randomBytes(24).toString('hex');
   const cwd = fs.realpathSync(dir), c = { dir, token, attemptId: crypto.randomUUID(), runId: 'run', nodeId: 'node', hostId: 'local', identityKey: 'identity', cwd: process.platform === 'win32' ? cwd.toLowerCase() : cwd };

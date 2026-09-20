@@ -11,7 +11,10 @@ async function main() {
   let browser;
   try {
     const token = (await (await fetch(base + '/api/session')).json()).token;
-    const node = blankNode({ prompt: 'fixture only' }), response = await fetch(base + '/api/trees', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Work-Tree-Token': token }, body: JSON.stringify(blankTree({ name: 'Orca UI test', nodes: [node] })) });
+    await fetch(base + '/api/machines/local', { method:'PUT', headers:{'Content-Type':'application/json','X-Work-Tree-Token':token}, body:JSON.stringify({name:'fixture',codexPath:path.join(root,'test/fixtures/fake-cli.cjs'),claudePath:path.join(root,'test/fixtures/fake-cli.cjs')}) });
+    const group = blankNode({ kind: 'group', title: '検証 WP', order: 0 });
+    const following = blankNode({ title: '既存の後続 TASK', parentId: group.id, order: 1 });
+    const node = blankNode({ prompt: 'fixture only', parentId: group.id, order: 0 }), response = await fetch(base + '/api/trees', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Work-Tree-Token': token }, body: JSON.stringify(blankTree({ name: 'Orca UI test', nodes: [group, node, following] })) });
     const tree = await response.json();
     browser = await chromium.launch({ headless: true, ...(process.env.WORK_TREE_BROWSER_CHANNEL ? { channel: process.env.WORK_TREE_BROWSER_CHANNEL } : {}) });
     const page = await browser.newPage({ viewport: { width: 1365, height: 1000 } }), errors = []; page.on('pageerror', e => errors.push(e.message));
@@ -25,6 +28,7 @@ async function main() {
     await page.locator('[data-modal-action="settings-save"]').click(); await expect(page.locator('#modal')).not.toBeVisible();
     await page.locator('[data-action="edit-tree"]').click();
     await page.locator('[data-node="' + node.id + '"]').click();
+    await page.locator('[data-field="criteria"]').fill('ホーム画面が表示される\nエラーが表示されない');
     const nodePicker = page.locator('[data-orca-picker="node"]');
     await expect(nodePicker.locator('[data-orca-inherit]')).toBeChecked();
     await nodePicker.locator('[data-orca-inherit]').uncheck(); await nodePicker.locator('[data-orca-key="hostId"]').selectOption('local');
@@ -37,8 +41,9 @@ async function main() {
     await page.locator('[data-verification="autoComplete"]').check();
     await page.keyboard.press('Control+s');
     await expect(page.locator('#node-footer')).toContainText('設定は保存済み');
-    const configured = (await (await fetch(base + '/api/state')).json()).trees.find(t => t.id === tree.id).nodes[0];
+    const configured = (await (await fetch(base + '/api/state')).json()).trees.find(t => t.id === tree.id).nodes.find(n => n.id === node.id);
     assert.equal(configured.verification.autoComplete, true); assert.deepEqual(configured.verification.args, ['-e', 'process.exit(0)']);
+    assert.equal(configured.criteria, 'ホーム画面が表示される\nエラーが表示されない');
     // This fixture has no real host files. Preserve the manual path for dispatch.
     await page.locator('summary').filter({ hasText: '完了条件の自動検証' }).click();
     await page.locator('[data-verification="autoComplete"]').uncheck();
@@ -46,7 +51,7 @@ async function main() {
     await page.keyboard.press('Control+s');
     await expect(page.locator('#node-footer')).toContainText('設定は保存済み');
     const saved = (await (await fetch(base + '/api/state')).json()).trees.find(t => t.id === tree.id);
-    assert.equal(saved.executionBackend, 'orca'); assert.equal(saved.orca.hostId, 'ssh:fixture'); assert.equal(saved.nodes[0].orca.hostId, 'local');
+    assert.equal(saved.executionBackend, 'orca'); assert.equal(saved.orca.hostId, 'ssh:fixture'); assert.equal(saved.nodes.find(n => n.id === node.id).orca.hostId, 'local');
     await page.locator('[data-action="run-node"]').click();
     await expect(page.locator('#node-footer [data-orca-focus]')).toBeVisible({ timeout: 20000 });
     await expect(page.locator('#node-footer [data-complete-run]')).toBeEnabled({ timeout: 20000 });
@@ -54,6 +59,40 @@ async function main() {
     await page.locator('#node-footer [data-complete-run]').click(); await page.locator('#complete-response').fill('fixture completed');
     await page.locator('[data-modal-action="complete"]').click(); await expect(page.locator('#modal')).not.toBeVisible();
     await expect(page.locator('#node-footer [data-action="run-node"]')).toBeEnabled({ timeout: 20000 });
+    const completedRun = app.store.data.runs.find(r => r.treeId === tree.id);
+    const stateFile = path.join(app.store.runDir(completedRun.id), 'state.json');
+    const completedState = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    completedState.nodes[node.id].canReassess = true;
+    completedState.nodes[node.id].response = 'fixture completed\n\nTaskDesk AI 判定（対話型・分割ペイン）:\n条件達成を確認';
+    completedState.nodes[node.id].assessment = { outcome: 'completed', detail: '条件達成を確認' };
+    require('../lib/core.cjs').atomic(stateFile, completedState);
+    let reassessRequested = false;
+    await page.route('**/api/runs/*/reassess', async route => { assert.equal(route.request().postDataJSON().nodeId, node.id); reassessRequested = true; await route.fulfill({ json: { ok: true } }); });
+    await expect(page.locator('.inspector-tabs button')).toHaveText(['設定', '実行結果', '実行履歴']);
+    await page.locator('#result-tab').click();
+    await expect(page.locator('[data-reassess]')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('#work-result-text')).toHaveText('fixture completed');
+    await expect(page.locator('#assessment-result-text')).toHaveText('条件達成を確認');
+    await page.locator('[data-reassess]').click();
+    await expect.poll(() => reassessRequested).toBe(true);
+    await page.locator('#followup-prompt').fill('- 追加の検証を実施\n- エラー時の表示も確認する');
+    await page.locator('#history-tab').click();
+    await page.locator('#result-tab').click();
+    await expect(page.locator('#followup-prompt')).toHaveValue('- 追加の検証を実施\n- エラー時の表示も確認する');
+    await page.locator('[data-add-followup]').click();
+    await expect(page.locator('[data-add-followup]')).toBeDisabled();
+    await expect(page.locator('#inspector-content')).toContainText('2 件の TASK を追加しました', { timeout:20000 });
+    await expect(page.locator('.task-result-header .outcome-badge.completed')).toContainText('完了');
+    const generation = app.store.data.runs.find(r=>r.kind==='plan'); assert.equal(generation.executionBackend,'direct');
+    const after = (await (await fetch(base + '/api/state')).json()).trees.find(t => t.id === tree.id);
+    const ordered = after.nodes.filter(n => n.parentId === node.parentId).sort((a,b) => a.order - b.order);
+    assert.equal(ordered[1].prompt, '追加の検証を実施');
+    assert.equal(ordered[2].criteria, 'エラー表示を確認できる');
+    assert.equal(ordered[3].id, following.id);
+    await expect(page.locator('#work-result-text')).toHaveText('fixture completed');
+    await page.locator('#close-node').click();
+    const boxes = await page.locator('.task-cell').evaluateAll(els=>els.map(el=>{const r=el.getBoundingClientRect();return {x:r.x,y:r.y,bottom:r.bottom};}));
+    for(let i=1;i<boxes.length;i++) { assert.equal(boxes[i].x,boxes[0].x); assert(boxes[i].y>=boxes[i-1].bottom); }
     await page.screenshot({ path: path.join(dir, 'orca-settings.png'), fullPage: true });
     assert.deepEqual(errors, []); console.log('Orca UI passed: selection, inheritance, host switch, persistence, execution, focus, completion. Artifacts: ' + dir);
   } finally { await browser?.close(); await app.close(); }

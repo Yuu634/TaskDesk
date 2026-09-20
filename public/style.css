@@ -67,7 +67,7 @@ a { color: var(--green); }
 .wp-heading h2 { font-size: 16px; font-weight: 600; margin: 0; flex: 1; overflow-wrap: anywhere; }
 .wp-content { padding: 22px 24px 24px; display: flex; flex-direction: column; gap: 18px; }
 .wp-content>.wp-panel { background: #e7e9e1; }
-.task-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(265px, 100%), 1fr)); gap: 14px; }
+.task-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
 .tree-node { display: flex; flex-direction: column; align-items: stretch; gap: 10px; width: 100%; min-width: 0; text-align: left; border: 1px solid #d4d8cd; border-radius: 5px; background: var(--paper); padding: 16px 18px; transition: border-color .15s, background .15s; }
 .tree-node:hover { border-color: #899a7e; background: #fdfefb; }
 .tree-node.selected { border-color: var(--green); box-shadow: inset 3px 0 0 var(--green); }

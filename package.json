@@ -1,6 +1,6 @@
 {
   "name": "taskdesk",
-  "version": "0.3.0",
+  "version": "0.7.2",
   "private": true,
   "description": "Persistent task trees for Codex and Claude Code, locally and over SSH",
   "engines": {

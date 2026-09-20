@@ -18,11 +18,15 @@ function respond(args, state, data = catalog, launch) {
     const w = data.worktrees.find(w => 'identity:' + w.identity.key === opt('--worktree'));
     if (!w) throw Error('missing worktree');
     const tool = (launch || JSON.parse(opt('--launch-spec'))).agent;
-    const terminal = { handle: 'term-' + Object.keys(state).length, incarnationId: 'incarnation-' + Object.keys(state).length, worktreeId: w.id, executionHostId: w.hostId, connected: true, writable: true, agentIdentity: tool };
+    const terminal = { handle: 'term-' + Object.keys(state).length, incarnationId: 'incarnation-' + Object.keys(state).length, tabId: 'tab-' + Object.keys(state).length, worktreeId: w.id, executionHostId: w.hostId, connected: true, writable: true, agentIdentity: tool };
     state[terminal.handle] = terminal; return { terminal };
   }
   const terminal = state[opt('--terminal')];
   if (!terminal) throw Error('missing terminal');
+  if (action === 'split') {
+    const pane = { ...terminal, handle: 'term-' + Object.keys(state).length, incarnationId: 'incarnation-' + Object.keys(state).length };
+    state[pane.handle] = pane; return { terminal: pane };
+  }
   if (action === 'show') return { terminal };
   if (action === 'wait') return { wait: { handle: terminal.handle, satisfied: true, status: 'idle' } };
   if (action === 'send') { terminal.prompt = opt('--text'); return { send: { handle: terminal.handle, accepted: true, prompt: { requestId: 'request-1', stages: ['input_accepted', 'turn_started'], provider: terminal.agentIdentity, processIncarnation: terminal.incarnationId } } }; }

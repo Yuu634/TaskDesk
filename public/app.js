@@ -57,7 +57,7 @@ function renderSidebar() {
 function interactiveLabel(value) {
   const backend = value.backend === 'orca' ? 'Orca' : 'herdr';
   if (value.phase === 'confirmation') return value.message || '応答終了・結果の確認待ち';
-  if (value.phase === 'verifying') return '完了条件を検証中';
+  if (value.phase === 'verifying') return value.message || 'Orca の同じタブで完了条件を判定中';
   if (value.phase === 'reconnecting') return '通知・端末の再接続待ち';
   return value.message || ({ starting: '対話 CLI を起動中', 'startup-blocked': backend + ' で起動時の確認に回答してください', submitted: 'プロンプトを送信しました', working: backend + ' で作業中', blocked: backend + ' で承認・質問に回答してください', ready: '対話を継続、または結果を記録してください', unknown: backend + ' の状態を確認してください', uncertain: backend + ' で送信結果を確認してください', completed: '結果を記録しました' })[value.phase] || value.phase;
 }
@@ -116,19 +116,7 @@ function renderCanvas() {
   }
   function contents(parentId) {
     const children = t.nodes.filter(n => n.parentId === parentId).sort((a, b) => a.order - b.order);
-    // Dependency levels express the diagram's branches; no parallel execution is implied.
-    const localTasks = children.filter(n => n.kind === 'task'), levels = new Map();
-    function level(n, visiting = new Set()) {
-      if (levels.has(n.id)) return levels.get(n.id);
-      if (visiting.has(n.id)) return 0;
-      const seen = new Set(visiting); seen.add(n.id);
-      const deps = localTasks.filter(d => n.dependsOn.includes(d.id));
-      const value = deps.length ? 1 + Math.max(...deps.map(d => level(d, seen))) : 0; levels.set(n.id, value); return value;
-    }
-    localTasks.forEach(n => level(n));
-    if (editingTree) return '<div class="task-row edit-task-row">' + localTasks.map(taskCard).join('') + '</div>' + children.filter(n => n.kind === 'group').map(group).join('');
-    const rows = [...new Set(levels.values())].sort((a, b) => a - b).map(l => '<div class="task-row">' + localTasks.filter(n => levels.get(n.id) === l).map(taskCard).join('') + '</div>').join('');
-    return rows + children.filter(n => n.kind === 'group').map(group).join('');
+    return children.map(n => n.kind === 'group' ? group(n) : '<div class="task-row' + (editingTree ? ' edit-task-row' : '') + '">' + taskCard(n) + '</div>').join('');
   }
   const orderedGroups = [];
   const visitGroups = parent => t.nodes.filter(n=>n.parentId===parent && n.kind==='group').sort((a,b)=>a.order-b.order).forEach(n=>{ orderedGroups.push(n); visitGroups(n.id); });
@@ -177,11 +165,11 @@ function nodeExecutionSettings(n, t) {
   const efforts = tool === 'codex' ? ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] : ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'];
   const v = n.verification || { command: '', args: [], timeoutSeconds: 60, autoComplete: false };
   return '<div class="node-execution">' +
-    (t.executionBackend === 'orca' && tool === 'codex' ? '<details class="detail-box"><summary>完了条件の自動検証</summary><p class="muted">Codex の応答終了後に、同じワークツリーで検証します。実行ファイルと引数を別々に指定してください。</p>' +
+    (t.executionBackend === 'orca' && tool === 'codex' ? '<p class="muted">終了通知の受信後、同じ Orca タブを分割し、新しい読み取り専用の対話型 Codex で判定します。作業の会話は残ります。判定後も追加質問できますが、ラベル更新には「完了条件を再判定」を使ってください。全条件を達成なら「完了」、未達・判断不能・条件未設定・判定失敗なら「要確認」です。判定にも AI の利用枠を使用します。</p><details class="detail-box"><summary>完了条件の自動検証（補助・任意）</summary><p class="muted">検証スクリプトは不要です。追加する場合は同じワークツリーで実行し、その結果も判定に使用します。</p>' +
       field('検証プログラム', '<input data-verification="command" value="' + esc(v.command) + '" placeholder="node または実行ファイルの絶対パス">') +
       field('引数（JSON 配列）', '<textarea data-verification="args">' + esc(JSON.stringify(v.args)) + '</textarea>') +
       field('検証の制限時間（秒）', '<input type="number" min="1" max="600" data-verification="timeoutSeconds" value="' + v.timeoutSeconds + '">') +
-      '<label class="checkbox-field"><input type="checkbox" data-verification="autoComplete" ' + (v.autoComplete ? 'checked' : '') + '>この検証で TASK の全完了条件を確認できるため、成功時は自動完了する</label><p class="muted">未設定・ターン状態を照合できない場合は確認待ちになります。</p></details>' : '') +
+      '<label class="checkbox-field"><input type="checkbox" data-verification="autoComplete" ' + (v.autoComplete ? 'checked' : '') + '>補助検証を実行する（失敗時は必ず要確認）</label><p class="muted">通知経路が手動の場合やターン状態を照合できない場合は、手動で結果を記録してください。</p></details>' : '') +
     (t.executionBackend === 'orca' ? orcaPicker(n.orca || t.orca, 'node', !n.orca) :
     field('作業マシン', nodeSelect('machineId', n.machineId, [['', '既定 · ' + machineName(t.machineId)], ...data.machines.map(m => [m.id, m.name + (m.type === 'ssh' ? ' / SSH' : ' / ローカル')])])) +
     field('作業ディレクトリ', nodeInput('cwd', n.cwd, 'input', 'placeholder="' + esc(t.cwd || '実行マシン上の絶対パス') + '"'))) +
@@ -197,12 +185,38 @@ function renderExecutionTarget() {
   out.textContent = toolName(tool) + ' · ' + (c.model || 'CLI の既定モデル') + ' · Thinking: ' + (c.effort || 'CLI の既定値') +
     (c.mode !== 'task' ? ' · ' + (c.mode === 'plan' ? '計画モード' : 'ゴールモード') : '') +
     (draft.executionBackend === 'orca' ? '\nOrca / ' + ((n.orca || draft.orca)?.hostId || '未設定') + ' / ' + ((n.orca || draft.orca)?.path || 'ワークツリー未設定') : draft.executionBackend === 'herdr' ? '\nherdr / ' + draft.name + ' / ' + n.title : '');
-  if (draft.executionBackend === 'orca') out.textContent += '\n' + (tool !== 'codex' || o?.notificationMode === 'manual' || o?.hostId !== 'local' && !o?.notificationMachineId ? '手動記録モード' : n.verification?.autoComplete ? '終了通知 → 完了条件の自動検証' : '終了通知 → 結果の確認待ち');
+  if (draft.executionBackend === 'orca') out.textContent += '\n' + (tool !== 'codex' || o?.notificationMode === 'manual' || o?.hostId !== 'local' && !o?.notificationMachineId ? '手動記録モード' : '終了通知 → AI による完了条件の判定');
+}
+const followupPrompts = new Map();
+let addingTask = false;
+const followupKey = () => draft.id + '/' + nodeId;
+function workResultText(result) {
+  if (typeof result?.workResponse === 'string') return result.workResponse;
+  const response = result?.response || '', detail = result?.assessment?.detail;
+  // Older runs stored the work and assessment in one response. Strip only the known suffix.
+  if (typeof detail === 'string') {
+    const suffix = response.match(/\n\nTaskDesk AI 判定（[^\n]*）:\n/gu)?.at(-1);
+    if (suffix && response.endsWith(suffix + detail)) return response.slice(0, -(suffix + detail).length);
+  }
+  return response;
+}
+async function addFollowupTask() {
+  if (addingTask || busy() || nodeSubmitting) return;
+  const source = draft.nodes.find(n => n.id === nodeId), prompt = ($('#followup-prompt')?.value || '').trim();
+  if (source?.kind !== 'task' || !prompt) throw new Error('タスク追加プロンプトを入力してください');
+  addingTask = true; renderInspector();
+  try {
+    if (dirty) await save();
+    const proposal = await api('/api/trees/' + draft.id + '/proposals', 'POST', { revision:draft.revision, scope:'insert', nodeId:source.id, request:prompt });
+    if (proposal.status === 'failed') throw new Error(proposal.error);
+    data.proposals ||= []; data.proposals.unshift(proposal);
+    toast('AI が追加タスクを生成しています。生成後、この TASK の直後に自動追加します');
+  } finally { addingTask = false; render(); }
 }
 function renderInspector() {
   renderNodeFooter();
   $('.inspector-tabs').hidden = false;
-  $('#node-tab').classList.toggle('active', tab === 'node'); $('#history-tab').classList.toggle('active', tab === 'history');
+  $('#node-tab').classList.toggle('active', tab === 'node'); $('#result-tab').classList.toggle('active', tab === 'result'); $('#history-tab').classList.toggle('active', tab === 'history');
   const t = current(), target = $('#inspector-content'), n = t?.nodes.find(n => n.id === nodeId);
   $('#node-dialog-title').textContent = tab === 'history' ? '実行履歴' : n?.title || 'タスク設定';
   $('.dialog-eyebrow').textContent = n?.kind === 'group' ? 'WORK PACKAGE' : 'TASK';
@@ -212,13 +226,30 @@ function renderInspector() {
     target.innerHTML = runs.map(r => '<article class="history-item"><div class="history-top">' + statusBadge(r.state.status) + '<span>' + esc(new Date(r.createdAt).toLocaleString('ja-JP')) + '</span></div>' + (r.state.error ? '<div class="error-box">' + esc(r.state.error) + '</div>' : '') + '<button class="button small" data-log="' + r.id + '">実行ログ</button>' + Object.entries(r.state.nodes || {}).map(([nid,x]) => '<h3>' + esc(t.nodes.find(n => n.id === nid)?.title || nid) + (x.outcome ? ' · ' + outcomeNames[x.outcome] : '') + '</h3>' + (x.response ? '<pre class="result-text">' + esc(x.response) + '</pre>' : '')).join('') + '</article>').join('') || '<p class="empty">実行履歴はまだありません</p>'; return;
   }
   if (!n) { target.innerHTML = '<p class="empty">WP または TASK を追加してください</p>'; return; }
+  if (tab === 'result') {
+    const insertion = (data.proposals || []).find(p=>p.treeId===t.id && p.anchorId===n.id && p.scope==='insert');
+    const generating = (data.proposals || []).some(p=>p.treeId===t.id && p.status==='generating');
+    const run = nodeRun(t, n.id) || data.runs.find(r => r.treeId === t.id && ['tree', 'node'].includes(r.kind) && r.state.nodes?.[n.id]?.response !== undefined);
+    const result = run?.state.nodes?.[n.id], old = run && run.treeRevision !== t.revision;
+    const outcome = Object.hasOwn(outcomeNames, result?.outcome) ? result.outcome : 'pending';
+    target.innerHTML = '<div class="task-result-header"><span class="outcome-badge result-outcome ' + outcome + '" role="status" aria-label="完了ラベル：' + esc(outcomeNames[outcome] || '未判定') + '"><span aria-hidden="true">' + ({completed:'✓',needs_review:'!',error:'×',unexpected:'!',pending:'○'}[outcome]) + '</span> ' + esc(outcomeNames[outcome] || '未判定') + '</span>' +
+      (n.kind === 'task' ? '<button class="button primary" data-add-followup ' + (busy() || nodeSubmitting || addingTask || generating ? 'disabled' : '') + '>タスク追加</button>' : '') + '</div>' +
+      (insertion ? '<p role="status">' + esc(insertion.status==='generating' ? 'AI がバックグラウンドで生成中です。完了すると自動追加します…' : insertion.status==='applied' ? (insertion.nodes?.length || 0) + ' 件の TASK を追加しました：' + insertion.summary : insertion.error || '追加は完了していません') + '</p>' : '') +
+      (old ? '<p class="muted">前のツリー設定で実行した結果です。</p>' : '') +
+      (result?.confirmedByUser ? '<p class="muted">人が完了を承認済み</p>' : '') +
+      '<h3>実行結果内容</h3><pre class="result-text" id="work-result-text">' + esc(workResultText(result) || '実行結果はまだありません') + '</pre>' +
+      '<h3>完了条件判定結果内容</h3><pre class="result-text" id="assessment-result-text">' + esc(result?.assessment?.detail || result?.assessment?.response || '完了条件の判定結果はまだありません') + '</pre>' +
+      (n.kind === 'task' ? field('タスク追加プロンプト（追加したいタスク一覧・箇条書き）', '<textarea id="followup-prompt" class="prompt" maxlength="12000" ' + (addingTask || generating ? 'disabled' : '') + ' placeholder="- エラーの原因を調査する&#10;- 修正を実装する&#10;- 次の TASK に必要な動作を検証する">' + esc((followupPrompts.get(followupKey()) ?? insertion?.request) || '') + '</textarea>') + '<p class="muted">AI が現在の TASK・実行結果・次の TASK を踏まえ、間を補完する TASK を生成し、同じ WP 内に自動追加します。各 TASK にプロンプトと完了条件を設定します。生成には AI の利用枠を使用します。' + (busy() ? '実行終了後に追加できます。' : '') + '</p>' : '') +
+      (!old && result?.status === 'review' ? '<button class="button primary" data-control="approve" data-run="' + run.id + '" data-approve-node="' + n.id + '">結果を確認し、完了として次へ進む</button>' : '') +
+      (!old && result?.canReassess && (result.status === 'review' || !busy()) ? '<button class="button" data-reassess="' + run.id + '" data-reassess-node="' + n.id + '">完了条件を再判定</button>' : '') +
+      (result?.error ? '<div class="error-box">' + esc(result.error) + '</div>' : '');
+    return;
+  }
   const run = nodeRun(t, n.id), result = run?.state.nodes?.[n.id];
   target.innerHTML = '<div class="node-status-line">' + statusBadge(nodeStatus(n, t, run?.state)) + (busy() ? '<span>実行中の設定は変更できません</span>' : '') + '</div><fieldset id="node-fields" ' + (busy() || nodeSubmitting ? 'disabled' : '') + '>' +
     field(n.kind === 'group' ? '共通プロンプト' : 'プロンプト', nodeInput('prompt', n.prompt, 'textarea', 'class="prompt" placeholder="このタスクで実行する内容を入力"')) +
-    (n.kind === 'task' ? nodeExecutionSettings(n, t) : '') + '</fieldset>' +
-    (result?.response ? '<details class="node-result"><summary>実行結果</summary><pre class="result-text">' + esc(result.response) + '</pre></details>' : '') +
-    (result?.status === 'review' ? '<button class="button primary" data-control="approve" data-run="' + run.id + '" data-approve-node="' + n.id + '">結果を確認して次へ進む</button>' : '') +
-    (result?.error ? '<div class="error-box">' + esc(result.error) + '</div>' : '');
+    (n.kind === 'task' ? field('完了条件（1 行に 1 条件）', nodeInput('criteria', n.criteria, 'textarea', 'placeholder="例：ログイン成功時にホーム画面が表示される"')) : '') +
+    (n.kind === 'task' ? nodeExecutionSettings(n, t) : '') + '</fieldset>';
   renderExecutionTarget();
 }
 function render() { renderSidebar(); renderHeader(); renderCanvas(); renderInspector(); renderProposals(); }
@@ -413,6 +444,12 @@ document.addEventListener('click', async event => {
     if (b.dataset.action) return await action(b.dataset.action);
     if (b.dataset.modalAction) return await modalAction(b.dataset.modalAction, b);
     if (b.dataset.log || b.dataset.logRefresh) return await showLog(b.dataset.log || b.dataset.logRefresh);
+    if (b.dataset.reassess) {
+      b.disabled = true;
+      try { await api('/api/runs/' + b.dataset.reassess + '/reassess', 'POST', { nodeId: b.dataset.reassessNode }); toast('再判定を開始しました'); await refresh(); } finally { b.disabled = false; }
+      return;
+    }
+    if (b.hasAttribute('data-add-followup')) return await addFollowupTask();
     if (b.dataset.control) {
       if (b.dataset.control === 'stop' && !confirm('この実行を停止しますか？ 実行済みの変更は保持されます。')) return;
       b.disabled = true;
@@ -427,6 +464,7 @@ document.addEventListener('click', async event => {
   } catch (e) { if ($('#node-dialog').open) nodeError(e.message); else toast(e.message, true); }
 });
 $('#inspector-content').addEventListener('input', event => {
+  if (event.target.id === 'followup-prompt') { followupPrompts.set(followupKey(), event.target.value); return; }
   const input = event.target, n = draft?.nodes.find(n => n.id === nodeId); if (!n || busy() || nodeSubmitting) return;
   $('#node-error').hidden = true;
   if (input.dataset.verification) {
@@ -463,6 +501,10 @@ function canCloseNode() {
 $('#close-node').onclick = () => { if (canCloseNode()) $('#node-dialog').close(); };
 $('#node-dialog').addEventListener('cancel', event => { if (!canCloseNode()) event.preventDefault(); });
 $('#open-history').onclick = () => { tab = 'history'; openNodePanel(); };
+$('#result-tab').onclick = () => {
+  if (invalidEnvNodeId || $('[data-verification="args"]:invalid')) return nodeError('入力内容を修正してからタブを切り替えてください');
+  tab = 'result'; renderInspector();
+};
 $('#node-tab').onclick = () => { if (invalidEnvNodeId) return; tab = 'node'; renderInspector(); }; $('#history-tab').onclick = () => { if (invalidEnvNodeId) return toast('環境変数の JSON を修正してください', true); tab = 'history'; renderInspector(); };
 document.addEventListener('keydown', event => {
   if ((event.ctrlKey || event.metaKey) && event.key === 's') { event.preventDefault(); save().catch(e => toast(e.message, true)); }
@@ -531,7 +573,8 @@ async function refresh() {
     renderProposals();
     renderSidebar(); if (!editingTree || !$('#project-header').contains(document.activeElement)) renderHeader();
     // Keep a focused editor stable while polling live execution state.
-    if (!dirty && !editingTree && !$('#modal').open && (!$('#inspector-content').contains(document.activeElement) || busy())) { renderCanvas(); renderInspector(); }
+    const focusedEditor = $('#inspector-content').contains(document.activeElement) && document.activeElement.matches('input:enabled, textarea:enabled, select:enabled');
+    if (!dirty && !editingTree && !$('#modal').open && (!focusedEditor || busy())) { renderCanvas(); renderInspector(); }
   } catch (e) { $('#connection-label').textContent = '再接続を待っています'; }
   finally { refreshing = false; }
 }

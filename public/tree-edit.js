@@ -1,5 +1,5 @@
 'use strict';
-const outcomeNames = { completed: '完了', error: 'エラー', unexpected: '想定外結果' };
+const outcomeNames = { completed: '完了', needs_review: '要確認', error: 'エラー', unexpected: '想定外結果' };
 function taskOutcome(n, t) {
   const run = data.runs.find(r => r.treeId === t.id && ['tree','node'].includes(r.kind) && ['succeeded','failed'].includes(r.state.nodes?.[n.id]?.status));
   const result = run?.state.nodes[n.id];
@@ -26,7 +26,7 @@ function proposalMarkup(p) {
 }
 function renderProposals() {
   if (!draft) { $('#manual-proposals').innerHTML = ''; return; }
-  const proposals = (data.proposals || []).filter(p => p.treeId === draft.id);
+  const proposals = (data.proposals || []).filter(p => p.treeId === draft.id && p.scope !== 'insert');
   const update = (el, html) => {
     if (el.dataset.html === html) return;
     const open = [...el.querySelectorAll('details[open]')].map(x => x.dataset.proposalDetails);

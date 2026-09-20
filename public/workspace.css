@@ -73,6 +73,7 @@
 .outcome-badge.completed { color: #426248; background: #edf3e9; }
 .outcome-badge.error { color: #963f34; background: #f8ece8; }
 .outcome-badge.unexpected { color: #876329; background: #f7f0df; }
+.outcome-badge.needs_review { color: #876329; background: #f7f0df; }
 .task-outcome { margin: 5px 0 8px 27px; }
 .proposal-card { margin-top: 9px; padding: 14px; border: 1px solid #d6c6a8; border-left: 3px solid #a78c5c; border-radius: 4px; background: #fbfaf6; font-size: 12px; overflow-wrap: anywhere; }
 .proposal-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; }
@@ -90,3 +91,6 @@
 #manual-proposals { margin-top: 12px; }
 .inline-move { flex-wrap: wrap; }
 @media(max-width:700px) { .proposal-diff { grid-template-columns: 1fr; } .wp-order-controls { margin-left: auto; } }
+.task-result-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+.result-outcome { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; padding: 7px 12px; border: 1px solid currentColor; border-radius: 999px; }
+.result-outcome.pending { color: #666; background: #f3f3f3; }

@@ -80,7 +80,7 @@ function createApp({ dataDir = process.env.WORK_TREE_DATA || path.join(__dirname
   }
   function stateResponse() {
     const runs = store.data.runs.map(r => ({ ...r, state: localState(r) }));
-    return { proposals: proposals.public(), trees: store.data.trees, machines: store.data.machines, runs, herdr: { syncErrors: herdr.errors }, version: '0.3.0', server: { capabilities: ['node-execution', 'herdr-execution', 'orca-execution', 'next-execution', 'orca-auto-results'], dataDir, pid: process.pid, platform: process.platform, wsl: isWSL, cwd: process.cwd(), hostname: require('node:os').hostname(), runtime: runtimeProfile() } };
+    return { proposals: proposals.public(), trees: store.data.trees, machines: store.data.machines, runs, herdr: { syncErrors: herdr.errors }, version: '0.7.2', server: { capabilities: ['node-execution', 'herdr-execution', 'orca-execution', 'next-execution', 'orca-auto-results'], dataDir, pid: process.pid, platform: process.platform, wsl: isWSL, cwd: process.cwd(), hostname: require('node:os').hostname(), runtime: runtimeProfile() } };
   }
   let startQueue = Promise.resolve();
   function startRun(...args) {
@@ -88,7 +88,7 @@ function createApp({ dataDir = process.env.WORK_TREE_DATA || path.join(__dirname
     startQueue = pending.catch(() => {});
     return pending;
   }
-  async function startRunImpl(tree, kind, resume = false, nodeId = null, progress = null) {
+  async function startRunImpl(tree, kind, resume = false, nodeId = null, progress = null, reassessment = null) {
     validateTree(tree, store.data.machines);
     assert(orderedTasks(tree).length > 0, '実行するタスクを追加してください');
     const runner = machineById(tree.runnerId);
@@ -98,6 +98,7 @@ function createApp({ dataDir = process.env.WORK_TREE_DATA || path.join(__dirname
     if (useOrca) {
       assert(runner.type === 'local', 'Orca 実行の管理マシンは「このマシン」にしてください');
       orcaContext = await orca.prepareTree(tree);
+      if (reassessment) orcaContext.reassessment = reassessment;
       for (const n of orderedTasks(tree)) n.orca = orcaContext.nodes[n.id];
     }
     const useHerdr = tree.executionBackend === 'herdr' && kind !== 'plan';
@@ -306,6 +307,22 @@ function createApp({ dataDir = process.env.WORK_TREE_DATA || path.join(__dirname
         }
         if (parts[1] === 'runs' && parts[2]) {
           const run = runById(parts[2]);
+          if (req.method === 'POST' && parts[3] === 'reassess') {
+            const data = await body(req), state = localState(run);
+            assert(run.executionBackend === 'orca' && state.nodes[data.nodeId]?.canReassess, 'この TASK の再判定情報がありません');
+            if (state.status === 'review' && state.currentNodeId === data.nodeId) {
+              atomic(path.join(store.runDir(run.id), 'control.json'), { id: id(), action: 'reassess', nodeId: data.nodeId });
+              return send(res, 200, { ok: true });
+            }
+            assert(!ACTIVE.has(state.status), '実行中の TASK が終了してから再判定してください');
+            const current = treeById(run.treeId); assert(current.revision === run.treeRevision, 'ツリー編集後は TASK を再実行してください');
+            const previous = read(path.join(store.runDir(run.id), 'input.json'));
+            const result = read(path.join(store.runDir(run.id), 'orca', data.nodeId, 'result.json'));
+            assert(result?.reassessment, '作業ペインの情報がありません');
+            const tree = structuredClone(previous.tree);
+            tree.nodes = tree.nodes.filter(n => n.id === data.nodeId).map(n => ({ ...n, parentId: null, dependsOn: [] }));
+            return send(res, 201, await startRun(tree, 'node', false, data.nodeId, null, result.reassessment));
+          }
           if (req.method === 'GET' && parts[3] === 'events') {
             const after = Number(url.searchParams.get('after') || 0); assert(Number.isSafeInteger(after) && after >= 0, '読み取り位置が不正です');
             const feed = run.runner.type === 'ssh' ? (await remoteAccess(run.runner, run.id, { events: true, after })).feed : readEvents(store.runDir(run.id), after);

@@ -51,7 +51,8 @@ async function main() {
     const treeBox = await page.locator('#tree-list').boundingBox(), headerBox = await page.locator('#project-header').boundingBox();
     assert(treeBox.y < headerBox.y, 'tree switcher is above the workspace');
     const bBox = await page.locator('[data-node="' + b.id + '"]').boundingBox(), cBox = await page.locator('[data-node="' + c.id + '"]').boundingBox();
-    assert.equal(bBox.y, cBox.y, 'dependency branches share a row');
+    assert.equal(bBox.x, cBox.x, 'tasks share one column');
+    assert(cBox.y >= bBox.y + bBox.height, 'dependency branches are stacked vertically');
     await page.screenshot({ path: path.join(dir, 'tree.png'), fullPage: true });
     await page.locator('[data-node="' + a.id + '"]').click();
     await expect(page.locator('#node-dialog')).toBeVisible();
@@ -94,6 +95,8 @@ async function main() {
     await page.locator('[data-tree-name]').fill('検索精度の改善・検証');
     await page.locator('[data-inline-field="title"][data-id="' + b.id + '"]').fill('誤回答の原因を特定する');
     // Actual drag moves a task between WP cards.
+    // The single-column layout is taller; keep both ends visible for this native drag.
+    await page.setViewportSize({ width:1365, height:1600 });
     await page.locator('[data-drag-id="' + c.id + '"]').dragTo(page.locator('.drop-zone[data-drop-parent="' + wp2.id + '"]'));
     await expect(page.locator('[data-drop-parent="' + wp2.id + '"] [data-inline-field="title"][data-id="' + c.id + '"]')).toBeVisible();
     await page.locator('.wp-heading [data-move-node="' + wp.id + '"][data-direction="1"]').click();

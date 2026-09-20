@@ -1,4 +1,5 @@
 'use strict';
+const { submittedPrompt } = require('../lib/orca-execution.cjs');
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const { execFileSync } = require('node:child_process');
@@ -8,6 +9,19 @@ const { launchInput, runInOrca } = require('../lib/orca-execution.cjs');
 const { catalog, respond } = require('./fixtures/fake-orca.cjs');
 const { createApp } = require('../server.cjs');
 const delay = ms => new Promise(r => setTimeout(r, ms));
+function judgeFixture(prepared, action, c, outcome = 'completed') {
+  const child = { ...c, token: 'judge-token', attemptId: 'judge-attempt', dir: '/fixture' };
+  if (action === 'prepare-pane') return { context: child, prompt: 'judge prompt' };
+  if (prepared.context.token !== child.token) return null;
+  return { ready: true, events: [{ ...child, rootSession: true, threadId: 'judge-thread', turnId: 'judge-turn', response: JSON.stringify({ criteria: [{ id: 1, status: outcome === 'completed' ? 'met' : 'unknown', evidence: 'fixture evidence' }] }), inputMessages: ['judge prompt'] }], activity: { supported: true, completed: true, turnId: 'judge-turn', fingerprint: 'judge-fingerprint' } };
+}
+test('prompt matching tolerates only leading terminal colour replies', () => {
+  assert.equal(submittedPrompt(']10;rgb:ffff/ffff/ffff\\]11;rgb:2828/2c2c/3434\\prompt'), 'prompt');
+  assert.equal(submittedPrompt('\x1b]10;rgb:ffff/ffff/ffff\x1b\\prompt'), 'prompt');
+  assert.equal(submittedPrompt('other prompt'), 'other prompt');
+  assert.equal(submittedPrompt('title: prompt'), 'title: prompt');
+  assert.equal(submittedPrompt(']10;not-a-colour\\prompt'), ']10;not-a-colour\\prompt');
+});
 const selection = i => { const w = catalog.worktrees[i]; return { projectId: w.projectId, hostId: w.hostId, worktreeId: w.id, identityKey: w.identity.key, notificationMode: 'manual' }; };
 const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'work-tree-orca-test-'));
 async function until(fn, timeout = 12000) { const end = Date.now() + timeout; while (Date.now() < end) { const r = await fn(); if (r) return r; await delay(20); } throw Error('Test timed out'); }
@@ -49,31 +63,73 @@ for (const tool of ['codex', 'claude']) test(tool + ' routes to SSH, sends liter
   assert(!s.calls.some(a => a[1] === 'close'));
   await assert.rejects(runInOrca(s.context, s.config, prompt), /起動済み/);
 });
-for (const outcome of ['completed', 'error', 'unexpected']) test('Orca automatically records final result: ' + outcome, async t => {
+test('startup argument delivery works without Orca agent identity and never types the work prompt', async t => {
+  const s = setup(t, 'codex', { modify(args, result) { if (args[1] === 'show') delete result.terminal.agentIdentity; return result; } });
+  const c = { token: 'token', attemptId: 'attempt', runId: 'test-run', nodeId: s.node.id, hostId: 'ssh:fixture', identityKey: 'wt2:ssh:1', startupPrompt: true };
+  const event = { ...c, rootSession: true, key: 'c'.repeat(64), threadId: 'thread', turnId: 'turn', response: 'done', inputMessages: ['literal prompt'] };
+  let assessed = false;
+  s.context.notifications = { prepare: async (_, __, ids) => { assert.equal(ids.prompt, 'literal prompt'); return { context: c }; }, request: async (_, action) => {
+    const judge = judgeFixture(_, action, c); if (judge) return judge;
+    if (action === 'assess') assessed = true;
+    return { ready: true, started: { token: c.token, pid: 123 }, events: [event], activity: { supported: true, completed: true, turnId: 'turn', fingerprint: 'stable' }, assessment: assessed ? { key: event.key, outcome: 'completed', detail: 'evidence', after: { fingerprint: 'stable' } } : null };
+  } };
+  s.config.criteria = '条件';
+  const result = await runInOrca(s.context, s.config, 'literal prompt');
+  assert.equal(result.outcome, 'completed');
+  const sends = s.calls.filter(a => a[1] === 'send');
+  assert.equal(sends.length, 0); assert.equal(s.calls.filter(a => a[1] === 'split').length, 1);
+});
+
+for (const outcome of ['completed', 'needs_review']) test('Orca automatically records final result: ' + outcome, async t => {
   const s = setup(t), c = { token: 'token', attemptId: 'attempt', runId: 'test-run', nodeId: s.node.id, hostId: 'ssh:fixture', identityKey: 'wt2:ssh:1' };
   const event = { ...c, rootSession: true, key: 'a'.repeat(64), threadId: 'thread', turnId: 'turn', response: 'verified result', inputMessages: ['fixture prompt'] };
   let verifyCount = 0;
   s.context.notifications = { prepare: async () => ({ context: c }), request: async (_, action) => {
-    if (action === 'verify') { verifyCount++; return {}; }
+    const judge = judgeFixture(_, action, c, outcome); if (judge) { if (action === 'prepare-pane') verifyCount++; return judge; }
+    if (action === 'assess') { verifyCount++; return {}; }
     if (action === 'ack') return {};
-    return { ready: true, events: s.calls.some(a => a[1] === 'send') ? [event, event] : [], activity: { supported: true, completed: true, turnId: 'turn', fingerprint: 'stable' }, verification: verifyCount ? { key: event.key, outcome, detail: 'checks', after: { fingerprint: 'stable' } } : null };
+    return { ready: true, events: s.calls.some(a => a[1] === 'send') ? [event, event] : [], activity: { supported: true, completed: true, turnId: 'turn', fingerprint: 'stable' }, assessment: verifyCount ? { key: event.key, outcome, detail: 'checks', after: { fingerprint: 'stable' } } : null };
   } };
-  s.config.verification = { autoComplete: true };
+  s.config.criteria = '結果を確認できる';
   const result = await runInOrca(s.context, s.config, 'fixture prompt');
   assert.equal(result.outcome, outcome); assert.equal(result.automatic, true);
   assert.match(result.response, /verified result/); assert.equal(verifyCount, 1);
-  assert.equal(s.calls.filter(a => a[1] === 'send').length, 1);
+  const sends = s.calls.filter(a => a[1] === 'send');
+  assert.equal(sends.length, 1); assert.equal(s.calls.filter(a => a[1] === 'split').length, 1);
+  assert.equal(s.calls.filter(a => a[1] === 'create').length, 1);
   assert(!s.calls.some(a => a[1] === 'close'));
 });
 
-for (const scenario of ['no-verification', 'missing-turn', 'new-turn', 'wrong-task', 'wrong-thread', 'reconnect']) test('notification does not falsely complete: ' + scenario, async t => {
+for (const scenario of ['resumed-work', 'lost-split', 'reassess']) test('split assessment: ' + scenario, async t => {
+  const s = setup(t, 'codex', { modify(args, result) { if (scenario === 'lost-split' && args[1] === 'split') throw Error('split acknowledgement lost'); return result; } });
+  const c = { token: 'token', attemptId: 'attempt', runId: 'test-run', nodeId: s.node.id, hostId: 'ssh:fixture', identityKey: 'wt2:ssh:1' };
+  const event = { ...c, rootSession: true, key: 'd'.repeat(64), threadId: 'thread', turnId: 'turn', response: 'work result', inputMessages: ['prompt'] };
+  let childSeen = false;
+  s.config.criteria = '条件';
+  s.context.notifications = { prepare: async () => ({ context: c }), request: async (prepared, action) => {
+    const judge = judgeFixture(prepared, action, c); if (judge) { if (action === 'collect') childSeen = true; return judge; }
+    return { ready: true, events: [event], activity: { supported: true, completed: !(scenario === 'resumed-work' && childSeen), turnId: 'turn', fingerprint: 'stable' } };
+  } };
+  const result = await runInOrca(s.context, s.config, 'prompt');
+  assert.equal(result.outcome, scenario === 'reassess' ? 'completed' : 'needs_review');
+  assert.equal(s.calls.filter(a => a[1] === 'split').length, 1);
+  assert(!s.calls.some(a => a.includes('/exit') || a[1] === 'close'));
+  if (scenario === 'reassess') {
+    const dir = temp();
+    const second = await runInOrca({ ...s.context, runDir: dir, reassessment: result.reassessment }, s.config, 'unused');
+    assert.equal(second.outcome, 'completed'); assert.equal(s.calls.filter(a => a[1] === 'split').length, 2);
+    assert.equal(s.calls.filter(a => a[1] === 'send').length, 1); assert.equal(s.calls.filter(a => a[1] === 'create').length, 1);
+  }
+});
+
+for (const scenario of ['missing-turn', 'new-turn', 'wrong-task', 'wrong-thread']) test('notification does not falsely complete: ' + scenario, async t => {
   const s = setup(t), c = { token: 'token', attemptId: 'attempt', runId: 'test-run', nodeId: s.node.id, hostId: 'ssh:fixture', identityKey: 'wt2:ssh:1' };
   const event = { ...c, rootSession: true, key: 'b'.repeat(64), threadId: 'thread', turnId: 'turn', response: 'Please clarify the requirement', inputMessages: ['prompt'] };
   if (scenario === 'wrong-task') event.nodeId = 'foreign';
   if (scenario === 'wrong-thread') event.inputMessages = ['some other prompt'];
   let lost = false, recovered = false, verified = false, settled = false;
   s.context.notifications = { prepare: async () => ({ context: c }), request: async (_, action) => {
-    if (action === 'verify') { verified = true; return {}; }
+    if (action === 'assess') { verified = true; return {}; }
     if (action !== 'collect') return {};
     const submitted = s.calls.some(a => a[1] === 'send');
     if (scenario === 'reconnect' && submitted && !lost) { lost = true; throw Error('Connection lost'); }

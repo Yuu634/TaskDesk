@@ -22,6 +22,7 @@ process.stdin.on('end', () => {
     if (process.env.FAKE_FAIL === '1') { console.error('intentional fixture failure'); process.exit(2); }
     const plan = { name: 'AI Generated Fixture', nodes: [{ id: 'g', title: '計画', kind: 'group' }, { id: 'a', title: '調査', kind: 'task', parentId: 'g', prompt: '調査を行う', criteria: '調査結果をまとめる', dependsOn: [] }] };
     let text = process.env.FAKE_RESPONSE || (prompt.startsWith('あなたは作業計画の設計者です。') ? JSON.stringify(plan) : '完了: ' + name + '\n' + prompt.slice(0, 120));
+    if (prompt.startsWith('あなたはタスク計画者です。')) text = JSON.stringify({summary:'後続 TASK の前に検証を補完',tasks:[{title:'追加検証',prompt:'追加の検証を実施',criteria:'追加検証が成功する'},{title:'エラー表示確認',prompt:'エラー時の表示も確認する',criteria:'エラー表示を確認できる'}]});
     if (prompt.startsWith('あなたはタスクツリーの編集者です。')) {
       const context = JSON.parse(prompt.split('編集コンテキスト JSON:\n')[1].split('\n')[0]);
       const nodes = context.tree.nodes.filter(n => context.editableIds.includes(n.id));
