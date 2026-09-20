@@ -1,0 +1,22 @@
+{
+  "name": "taskdesk",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Persistent task trees for Codex and Claude Code, locally and over SSH",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node server.cjs",
+    "dev": "node --watch server.cjs",
+    "background": "node scripts/service.cjs start",
+    "stop": "node scripts/service.cjs stop",
+    "restart": "node scripts/service.cjs restart",
+    "doctor": "node scripts/doctor.cjs",
+    "herdr": "node scripts/herdr.cjs",
+    "tui": "node scripts/task-tree.cjs",
+    "test": "node --test test/*.test.cjs",
+    "check": "node scripts/check.cjs",
+    "test:herdr": "node scripts/herdr-smoke.cjs"
+  }
+}

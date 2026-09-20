@@ -1,0 +1,6 @@
+node_modules/
+.work-tree/
+.test-data/
+*.log
+.env
+coverage/

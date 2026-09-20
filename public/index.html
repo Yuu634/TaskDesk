@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#f5f4f1"><title>TaskDesk</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/workspace.css">
+  <script src="/next-execution.js" defer></script><script src="/cli-ui.js" defer></script><script src="/app.js" defer></script><script src="/orca-ui.js" defer></script><script src="/tree-edit.js" defer></script><script src="/workspace-ui.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <a class="brand" href="/" aria-label="TaskDesk ホーム"><svg width="26" height="26" viewBox="0 0 26 26" fill="none" aria-hidden="true"><path d="M6 4v18M6 9h14M6 18h14" stroke="currentColor" stroke-width="2"/><path d="M17 6h6v6h-6zM17 15h6v6h-6z" fill="currentColor"/></svg>TaskDesk</a>
+      <div class="header-actions"><details class="app-menu"><summary aria-label="設定メニュー">設定</summary><div class="menu-panel"><button id="machines-button">マシンと AI ツール <span id="machine-count"></span></button><button id="notion-button">Notion 連携</button><span id="connection-label">接続中</span></div></details><button id="new-tree" class="button primary">＋ ワークツリー作成</button></div>
+    </header>
+    <section class="tree-switcher" aria-label="ツリーを切り替え">
+      <div class="switcher-label"><span>ワークツリー <span id="tree-count">0</span></span><label class="search"><input id="search" placeholder="ツリーを検索" aria-label="ツリーを検索"></label></div>
+      <nav id="tree-list" aria-label="タスクツリー一覧"></nav>
+    </section>
+    <main class="workspace">
+      <section id="project-header" class="project-header"></section>
+      <div class="workspace-tools"><div id="next-execution" aria-live="polite"></div><div class="toolbar-actions"><span id="dirty-label" class="dirty-label" hidden>未保存の変更</span><button id="open-history" class="text-button">実行履歴</button><button id="save-tree" class="button small" disabled>変更を保存</button></div></div>
+      <div id="inline-edit-tools" hidden><span>名前を直接編集 · ドラッグで配置を変更</span><button class="button small" data-action="add-wp">＋ WP</button><button class="button small" data-action="add-root">＋ TASK</button><button class="button small" data-ai-edit>AI で編集</button><button class="text-button" data-action="settings">実行の既定設定</button><button class="text-button" data-action="cancel-edit">変更を破棄</button></div>
+      <div id="manual-proposals" aria-live="polite"></div>
+      <section class="canvas-panel" aria-label="タスクツリー">
+        <div class="canvas-topline"><span>WORK PACKAGES</span><span id="node-count"></span></div>
+        <div id="canvas-viewport"><div id="canvas-stage"></div></div>
+        <div id="execution-strip" class="execution-strip"></div>
+      </section>
+    </main>
+  </div>
+  <dialog id="node-dialog" aria-labelledby="node-dialog-title">
+    <div class="modal-header"><div><span class="dialog-eyebrow">TASK</span><h2 id="node-dialog-title">タスク設定</h2></div><button id="close-node" aria-label="閉じる">×</button></div>
+    <div class="inspector-tabs"><button id="node-tab" class="active">設定</button><button id="history-tab">実行履歴</button></div>
+    <div id="inspector-content"></div>
+    <div id="node-error" class="error-box" role="alert" hidden></div><div id="node-footer" class="modal-footer"></div>
+  </dialog>
+  <dialog id="modal"><div id="modal-content"></div></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

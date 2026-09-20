@@ -1,0 +1,92 @@
+#node-dialog { width: min(720px, calc(100vw - 32px)); overflow: hidden; }
+#node-dialog[open] { display: flex; flex-direction: column; }
+.inspector-tabs { display: flex; gap: 24px; padding: 0 30px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
+.inspector-tabs button { border: 0; border-bottom: 2px solid transparent; background: none; font-size: 12px; padding: 13px 0; color: var(--muted); }
+.inspector-tabs button.active { color: var(--ink); border-bottom-color: var(--green); }
+#inspector-content { padding: 24px 30px; overflow: auto; flex: 1; min-width: 0; }
+.node-status-line { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; font-size: 12px; color: var(--muted); }
+.node-execution { border-top: 1px solid var(--line); padding-top: 24px; }
+.execution-target { white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 0; }
+.node-result { border-top: 1px solid var(--line); padding-top: 20px; margin-top: 20px; }
+.node-result summary { font-size: 12px; cursor: pointer; }
+#node-error { flex-shrink: 0; max-height: 100px; overflow: auto; margin: 0 30px 16px; }
+@media (max-width: 700px) {
+ #node-dialog { width: calc(100vw - 16px); max-height: 96dvh; }
+ #node-dialog .modal-header, #inspector-content { padding: 18px; }
+ .inspector-tabs { padding: 0 18px; } #node-error { margin: 0 18px 12px; }
+ #node-footer { flex-wrap: wrap; } #node-footer small { flex-basis: 100%; }
+}
+/* Compact task overview and direct editing on the canvas. */
+.app-header { padding-top: 18px; padding-bottom: 18px; }
+.tree-switcher { padding-bottom: 12px; }
+.tree-item { padding: 12px 16px; }
+.tree-item-top { margin-bottom: 7px; }
+.workspace { padding-top: 18px; }
+.project-header h1 { margin-bottom: 16px; font-size: 23px; }
+.workspace-tools { margin-top: 16px; padding-bottom: 8px; }
+.canvas-topline { padding: 13px 0 10px; }
+#canvas-stage { gap: 14px; }
+.wp-heading { padding: 12px 18px; }
+.wp-heading h2 { font-size: 14px; }
+.wp-content { padding: 12px 16px 16px; gap: 9px; }
+.task-row { gap: 9px; }
+.tree-node { display: flex; flex-direction: row; align-items: center; gap: 10px; padding: 10px 12px; min-height: 43px; }
+.tree-node strong { flex: 1; font-size: 13px; line-height: 1.5; min-width: 0; }
+.tree-node .task-index { flex: 0 0 20px; }
+.tree-node .status-badge { flex-shrink: 0; font-size: 9px; }
+.tree-node.editable { display: block; padding: 8px 10px; }
+.inline-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.inline-name input { flex: 1; min-width: 0; border: 1px solid transparent; border-radius: 3px; padding: 6px; background: transparent; font-size: 13px; }
+.inline-name input:hover { border-color: #c5ccbe; }
+.inline-name input:focus { border-color: var(--green); outline: none; background: white; }
+.drag-handle, .remove-node { flex: 0 0 25px; padding: 3px; border: 0; background: none; color: var(--muted); }
+.drag-handle { cursor: grab; font-size: 20px; }
+.remove-node { font-size: 18px; }
+.remove-node:hover { color: var(--red); }
+.inline-details>summary { cursor: pointer; font-size: 11px; color: var(--muted); padding: 3px 0; }
+.inline-fields { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 12px; }
+.inline-fields .field { margin-bottom: 12px; }
+.inline-fields .field textarea { font-size: 12px; min-height: 85px; }
+.inline-move { display: flex; align-items: center; gap: 6px; }
+.edit-task-row { align-items: start; }
+#inline-edit-tools { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 12px 0 0; }
+#inline-edit-tools>span { font-size: 11px; color: var(--muted); margin-right: auto; }
+.tree-title-input { display: block; margin: 8px auto 16px; padding: 5px 12px; font-size: 23px; font-weight: 600; background: white; text-align: center; border: 1px solid #b5bfac; width: min(640px,100%); border-radius: 4px; }
+.drop-zone { border: 1px dashed #b9c3b0; border-radius: 3px; padding: 9px; text-align: center; font-size: 10px; color: var(--muted); }
+.drag-over { outline: 2px solid var(--green); outline-offset: -2px; background: #e0ebda !important; }
+.interactive-controls { flex-basis: 100%; display: flex; justify-content: center; align-items: center; gap: 12px; font-size: 12px; color: var(--green); }
+@media(max-width:700px) {
+ .app-header { padding: 15px 18px; } .workspace { padding: 15px 16px; }
+ .wp-content { padding: 10px; } .wp-heading { padding: 10px; }
+ .task-row { grid-template-columns: 1fr; } .interactive-controls { grid-column: 1/-1; flex-wrap: wrap; }
+ .inline-name { flex-wrap: nowrap; } .wp-heading.inline-name { flex-wrap: wrap; }
+ .wp-heading.inline-name input { flex-basis: 55%; } .tree-title-input { font-size: 20px; }
+}
+/* Tree changes stay beside their task, with a quiet before/after review. */
+.task-cell { min-width: 0; }
+.task-cell>.tree-node { width: 100%; }
+.wp-order-controls { display: flex; gap: 3px; flex-shrink: 0; }
+.wp-order-controls button { font-size: 17px; padding: 3px 7px; text-decoration: none; }
+.drop-before { box-shadow: 0 -3px 0 var(--green) !important; }
+.drop-after { box-shadow: 0 3px 0 var(--green) !important; }
+.outcome-badge { white-space: nowrap; font-size: 10px; padding: 4px 7px; border-radius: 3px; flex-shrink: 0; }
+.outcome-badge.completed { color: #426248; background: #edf3e9; }
+.outcome-badge.error { color: #963f34; background: #f8ece8; }
+.outcome-badge.unexpected { color: #876329; background: #f7f0df; }
+.task-outcome { margin: 5px 0 8px 27px; }
+.proposal-card { margin-top: 9px; padding: 14px; border: 1px solid #d6c6a8; border-left: 3px solid #a78c5c; border-radius: 4px; background: #fbfaf6; font-size: 12px; overflow-wrap: anywhere; }
+.proposal-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+.proposal-heading small, .proposal-hint { color: var(--muted); font-size: 11px; }
+.proposal-card p { line-height: 1.7; margin: 9px 0; white-space: pre-wrap; }
+.proposal-card summary { cursor: pointer; padding: 7px 0; }
+.proposal-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.proposal-changes { list-style: none; margin: 0; padding: 0; }
+.proposal-changes>li { margin: 12px 0; }
+.proposal-diff { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; margin-top: 8px; }
+.proposal-diff>div { border: 1px solid var(--line); padding: 10px; background: white; }
+.proposal-diff small { color: var(--muted); }
+.proposal-diff pre { font: inherit; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; line-height: 1.65; }
+#manual-proposals:empty, [data-task-proposals]:empty { display: none; }
+#manual-proposals { margin-top: 12px; }
+.inline-move { flex-wrap: wrap; }
+@media(max-width:700px) { .proposal-diff { grid-template-columns: 1fr; } .wp-order-controls { margin-left: auto; } }

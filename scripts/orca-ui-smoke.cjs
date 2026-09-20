@@ -1,0 +1,61 @@
+'use strict';
+const { chromium, expect } = require(process.env.WORK_TREE_PLAYWRIGHT || '@playwright/test');
+const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict');
+const { createApp } = require('../server.cjs');
+const { blankTree, blankNode } = require('../lib/core.cjs');
+async function main() {
+  const root = path.resolve(__dirname, '..'); fs.mkdirSync(path.join(root, '.test-data'), { recursive: true });
+  const dir = fs.mkdtempSync(path.join(root, '.test-data/orca-ui-'));
+  process.env.ORCA_BIN = path.join(root, 'test/fixtures/fake-orca.cjs'); process.env.ORCA_FAKE_FILE = path.join(dir, 'fake.json');
+  const app = createApp({ dataDir: dir, port: 0 }), address = await app.listen(), base = 'http://127.0.0.1:' + address.port;
+  let browser;
+  try {
+    const token = (await (await fetch(base + '/api/session')).json()).token;
+    const node = blankNode({ prompt: 'fixture only' }), response = await fetch(base + '/api/trees', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Work-Tree-Token': token }, body: JSON.stringify(blankTree({ name: 'Orca UI test', nodes: [node] })) });
+    const tree = await response.json();
+    browser = await chromium.launch({ headless: true, ...(process.env.WORK_TREE_BROWSER_CHANNEL ? { channel: process.env.WORK_TREE_BROWSER_CHANNEL } : {}) });
+    const page = await browser.newPage({ viewport: { width: 1365, height: 1000 } }), errors = []; page.on('pageerror', e => errors.push(e.message));
+    await page.goto(base); await page.locator('[data-tree="' + tree.id + '"]').click();
+    await page.locator('[data-action="edit-tree"]').click(); await page.locator('[data-action="settings"]').click();
+    await page.locator('#setting-backend').selectOption('orca');
+    const picker = page.locator('[data-orca-picker="tree"]');
+    await expect(picker.locator('[data-orca-key="projectId"] option[value="project:test"]')).toBeAttached();
+    await picker.locator('[data-orca-key="projectId"]').selectOption('project:test'); await picker.locator('[data-orca-key="hostId"]').selectOption('ssh:fixture');
+    await picker.locator('[data-orca-key="worktreeId"]').selectOption('ssh-repo::/mnt/repo');
+    await page.locator('[data-modal-action="settings-save"]').click(); await expect(page.locator('#modal')).not.toBeVisible();
+    await page.locator('[data-action="edit-tree"]').click();
+    await page.locator('[data-node="' + node.id + '"]').click();
+    const nodePicker = page.locator('[data-orca-picker="node"]');
+    await expect(nodePicker.locator('[data-orca-inherit]')).toBeChecked();
+    await nodePicker.locator('[data-orca-inherit]').uncheck(); await nodePicker.locator('[data-orca-key="hostId"]').selectOption('local');
+    await expect(nodePicker.locator('[data-orca-key="worktreeId"]')).toHaveValue('');
+    await nodePicker.locator('[data-orca-key="worktreeId"]').selectOption('local-repo::C:/repo');
+    await page.locator('summary').filter({ hasText: '完了条件の自動検証' }).click();
+    await page.locator('[data-verification="command"]').fill('node');
+    await page.locator('[data-verification="args"]').fill('["-e","process.exit(0)"]');
+    await page.locator('[data-verification="timeoutSeconds"]').fill('5');
+    await page.locator('[data-verification="autoComplete"]').check();
+    await page.keyboard.press('Control+s');
+    await expect(page.locator('#node-footer')).toContainText('設定は保存済み');
+    const configured = (await (await fetch(base + '/api/state')).json()).trees.find(t => t.id === tree.id).nodes[0];
+    assert.equal(configured.verification.autoComplete, true); assert.deepEqual(configured.verification.args, ['-e', 'process.exit(0)']);
+    // This fixture has no real host files. Preserve the manual path for dispatch.
+    await page.locator('summary').filter({ hasText: '完了条件の自動検証' }).click();
+    await page.locator('[data-verification="autoComplete"]').uncheck();
+    await nodePicker.locator('[data-orca-key="notificationMode"]').selectOption('manual');
+    await page.keyboard.press('Control+s');
+    await expect(page.locator('#node-footer')).toContainText('設定は保存済み');
+    const saved = (await (await fetch(base + '/api/state')).json()).trees.find(t => t.id === tree.id);
+    assert.equal(saved.executionBackend, 'orca'); assert.equal(saved.orca.hostId, 'ssh:fixture'); assert.equal(saved.nodes[0].orca.hostId, 'local');
+    await page.locator('[data-action="run-node"]').click();
+    await expect(page.locator('#node-footer [data-orca-focus]')).toBeVisible({ timeout: 20000 });
+    await expect(page.locator('#node-footer [data-complete-run]')).toBeEnabled({ timeout: 20000 });
+    await page.locator('#node-footer [data-orca-focus]').click();
+    await page.locator('#node-footer [data-complete-run]').click(); await page.locator('#complete-response').fill('fixture completed');
+    await page.locator('[data-modal-action="complete"]').click(); await expect(page.locator('#modal')).not.toBeVisible();
+    await expect(page.locator('#node-footer [data-action="run-node"]')).toBeEnabled({ timeout: 20000 });
+    await page.screenshot({ path: path.join(dir, 'orca-settings.png'), fullPage: true });
+    assert.deepEqual(errors, []); console.log('Orca UI passed: selection, inheritance, host switch, persistence, execution, focus, completion. Artifacts: ' + dir);
+  } finally { await browser?.close(); await app.close(); }
+}
+main().catch(e => { console.error(e); process.exitCode = 1; });
