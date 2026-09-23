@@ -43,6 +43,51 @@ test('next TASK then next WP skip completed dependencies and stop after all task
   assert.equal((await s.request('/api/trees/' + tree.id + '/run', 'POST', { next: 'task' })).status, 400);
 });
 
+test('edited trees reuse unchanged completed tasks including legacy snapshots after restart', async t => {
+  const s=await setup(t), trace=path.join(s.dir,'trace');
+  const a=blankNode({prompt:'A',env:{FAKE_NAME:'A',FAKE_TRACE:trace}});
+  const b=blankNode({prompt:'B',order:1,dependsOn:[a.id],env:{FAKE_NAME:'B',FAKE_TRACE:trace}});
+  let tree=await s.create([a,b]);
+  const first=await s.request('/api/trees/'+tree.id+'/run','POST',{next:'task'});
+  assert.equal(first.status,201);await waitFor(()=>s.state(first.data.id)?.status==='succeeded');
+  delete s.app.store.data.runs[0].taskDefinitions;s.app.store.save();
+  tree.nodes[1].prompt='B revised';tree=(await s.request('/api/trees/'+tree.id,'PUT',tree)).data;
+  await s.restart();
+  const apiState=(await s.request('/api/state')).data;
+  assert.equal(require('../public/next-execution.js').executionProgress(tree,apiState.runs)[a.id].status,'succeeded');
+  const second=await s.request('/api/trees/'+tree.id+'/run','POST',{next:'task'});
+  assert.equal(second.status,201,JSON.stringify(second.data));await waitFor(()=>s.state(second.data.id)?.status==='succeeded');
+  assert.equal(fs.readFileSync(trace,'utf8'),'A\nB\n');
+  tree.nodes[0].criteria='new condition';tree=(await s.request('/api/trees/'+tree.id,'PUT',tree)).data;
+  const progress=require('../public/next-execution.js').executionProgress(tree,(await s.request('/api/state')).data.runs);
+  assert.equal(progress[a.id],undefined);assert.equal(progress[b.id],undefined);
+});
+
+test('manual labels persist on finished results, preserve AI evidence and block next tasks until completed', async t => {
+ const s=await setup(t),a=blankNode({prompt:'A'}),b=blankNode({prompt:'B',order:1,dependsOn:[a.id]});
+ const tree=await s.create([a,b]);
+ const run=(await s.request('/api/trees/'+tree.id+'/run','POST',{next:'task'})).data;
+ await waitFor(()=>s.state(run.id)?.status==='succeeded');const response=s.state(run.id).nodes[a.id].response;
+ for(const outcome of ['error','unexpected','needs_review','completed']) {
+  const r=await s.request('/api/runs/'+run.id+'/label','POST',{nodeId:a.id,outcome,note:'human checked'});
+  assert.equal(r.status,200,JSON.stringify(r.data));assert.equal(s.state(run.id).nodes[a.id].outcome,outcome);
+  assert.equal(s.state(run.id).nodes[a.id].response,response);
+ }
+ await s.restart();assert.equal(s.state(run.id).nodes[a.id].manualLabel.source,'user');assert.equal(s.state(run.id).nodes[a.id].labelHistory.length,4);
+ const progress=require('../public/next-execution.js');assert.equal(progress.nextExecution(tree,progress.executionProgress(tree,(await s.request('/api/state')).data.runs)).task.id,b.id);
+ assert.equal((await s.request('/api/runs/'+run.id+'/label','POST',{nodeId:a.id,outcome:'invalid'})).status,400);
+});
+
+test('manual labelling safely migrates an older idle review worker without rerunning the task',async t=>{
+ const s=await setup(t), a=blankNode({prompt:'A'}), tree=await s.create([a],{completionMode:'manual'});
+ const run=(await s.request('/api/trees/'+tree.id+'/run','POST',{next:'task'})).data;
+ await waitFor(()=>s.state(run.id)?.status==='review');
+ const old=s.state(run.id);delete old.manualLabelVersion;atomic(path.join(s.dir,'runs',run.id,'state.json'),old);
+ const result=await s.request('/api/runs/'+run.id+'/label','POST',{nodeId:a.id,outcome:'completed'});
+ assert.equal(result.status,200,JSON.stringify(result.data));assert(result.data.message);
+ assert.equal(s.state(run.id).status,'succeeded');assert.equal(s.state(run.id).nodes[a.id].response,old.nodes[a.id].response);
+});
+
 test('API protects cross-origin writes and optimistic revisions', async t => {
   const s = await setup(t);
   assert.equal((await s.request('/api/trees', 'POST', {}, { Origin: 'https://untrusted.example' })).status, 403);
@@ -161,6 +206,22 @@ test('AI generation endpoint runs a read-only planner then imports an editable t
   assert.equal(imported.data.name, 'AI Generated Fixture');
   assert.deepEqual(imported.data.brief, brief);
   assert.equal(imported.data.nodes[1].parentId, imported.data.nodes[0].id);
+});
+test('Orca SSH tree generation submits its prompt in background and preserves execution settings on import', async t => {
+  const s=await setup(t);
+  const orca={projectId:'project:test',hostId:'ssh:offline',worktreeId:'remote:/repo',path:'/remote/repo',notificationMode:'manual'};
+  const settings={name:'SSH plan',tool:'codex',executionBackend:'orca',orca,cwd:'',cli:{codex:{model:'selected-model'}},attachments:[{name:'remote note',path:'/remote/note.md',kind:'file'}]};
+  const result=await s.request('/api/generate','POST',{...settings,prompt:'CSV を検証するタスクを作成'});
+  assert.equal(result.status,201,JSON.stringify(result.data)); assert.equal(result.data.executionBackend,'direct');
+  await waitFor(()=>s.state(result.data.id)?.status==='succeeded');
+  const input=read(path.join(s.dir,'runs',result.data.id,'input.json'));
+  assert.equal(input.tree.runnerId,'local'); assert.equal(input.tree.cwd,process.cwd());
+  assert.match(input.tree.nodes[0].prompt,/CSV を検証するタスクを作成/); assert.equal(input.tree.nodes[0].sandbox,'read-only');
+  assert.equal(input.tree.cli.codex.model,'selected-model'); assert.equal(input.tree.orca,undefined);
+  const imported=await s.request('/api/runs/'+result.data.id+'/import','POST',{});
+  assert.equal(imported.status,201,JSON.stringify(imported.data));
+  assert.equal(imported.data.executionBackend,'orca'); assert.deepEqual(imported.data.orca,orca);
+  assert.deepEqual(imported.data.attachments,settings.attachments); assert.equal(imported.data.name,settings.name);
 });
 test('executor accepts literal prompts, reports nonzero exit and enforces timeout', async t => {
   const dir = fs.mkdtempSync(path.join(testRoot, 'executor-')), machine = { codexPath: fixture, claudePath: fixture };
@@ -299,9 +360,9 @@ test('WSL node execution translates local Windows paths only in the execution sn
   assert.equal(s.app.store.data.trees.find(t => t.id === tree.id).nodes[0].cwd, windowsCwd);
 });
 
-test('AI edit proposals persist, preview changes, reject stale application and preserve execution settings', async t => {
+for (const backend of ['direct','orca']) test('AI edit proposals persist, preview changes, reject stale application and preserve execution settings: '+backend, async t => {
   const s = await setup(t), a=blankNode({prompt:'first',cli:{codex:{model:'keep-model'}},env:{PRIVATE:'keep'}}), outside=blankNode({prompt:'outside',order:2});
-  let tree=await s.create([a,outside]);
+  let tree=await s.create([a,outside], {executionBackend:backend});
   const generate=async()=>{
     const r=await s.request('/api/trees/'+tree.id+'/proposals','POST',{revision:tree.revision,scope:'branch',nodeId:a.id,request:'原因調査と再検証を追加'});
     assert.equal(r.status,201,JSON.stringify(r.data));

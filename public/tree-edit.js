@@ -1,15 +1,16 @@
 'use strict';
 const outcomeNames = { completed: '完了', needs_review: '要確認', error: 'エラー', unexpected: '想定外結果' };
 function taskOutcome(n, t) {
-  const run = data.runs.find(r => r.treeId === t.id && ['tree','node'].includes(r.kind) && ['succeeded','failed'].includes(r.state.nodes?.[n.id]?.status));
+  const currentRun = nodeRun(t,n.id);
+  const run = currentRun?.state.nodes[n.id]?.outcome ? currentRun : data.runs.find(r => r.treeId === t.id && ['tree','node'].includes(r.kind) && ['succeeded','failed','review'].includes(r.state.nodes?.[n.id]?.status) && !r.state.nodes[n.id].reused);
   const result = run?.state.nodes[n.id];
-  return result ? { run, result, outcome: result.outcome || (result.status === 'succeeded' ? 'completed' : 'error') } : null;
+  return result ? { run, result, outcome: result.outcome || (result.status === 'succeeded' ? 'completed' : result.status === 'review' ? 'needs_review' : 'error') } : null;
 }
 function outcomeBadge(n, t) {
   const item = taskOutcome(n,t); if (!item) return '';
   const currentRun = nodeRun(t,n.id), currentResult = currentRun?.state.nodes[n.id];
   if (currentResult?.status === 'running') return '';
-  const previous = item.run.treeRevision !== t.revision || currentRun && currentRun.id !== item.run.id;
+  const previous = !TaskDeskExecution.taskMatches(t, item.run, n.id) || currentRun && currentRun.id !== item.run.id;
   return '<span class="outcome-badge ' + item.outcome + '" title="' + (previous ? '編集前・前回の実行結果' : 'タスクの実行結果') + '">' + (previous ? '前回：' : '') + outcomeNames[item.outcome] + '</span>';
 }
 function proposalMarkup(p) {
@@ -42,7 +43,6 @@ function renderProposals() {
 }
 async function showAIEdit(anchor = nodeId) {
   if (busy()) throw Error('実行終了後に編集してください');
-  if (draft.executionBackend === 'orca') throw Error('Orca 実行では AI 編集案の自動生成に未対応です。「ツリー編集」で変更するか、Orca の対話で計画を検討してください');
   modalKind = 'ai-edit';
   modal('AI でツリーを編集', '編集案を確認してから適用できます。',
     field('編集範囲', '<select id="ai-scope">' + options([['tree','ツリー全体'], ...draft.nodes.map(n=>[n.id,(n.kind==='group'?'WP · ':'TASK · ')+n.title+(n.kind==='group'?' と配下':'' )])], anchor || 'tree') + '</select>') +

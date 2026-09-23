@@ -94,3 +94,18 @@
 .task-result-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
 .result-outcome { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; padding: 7px 12px; border: 1px solid currentColor; border-radius: 999px; }
 .result-outcome.pending { color: #666; background: #f3f3f3; }
+@media (max-width: 700px) {
+ input:not([type="checkbox"]):not([type="radio"]):not([type="file"]), textarea, select,
+ .field input, .field textarea, .field select, .field textarea.code, .inline-name input {
+  font-size: 16px;
+ }
+ input, textarea { -webkit-user-select: text; user-select: text; }
+ dialog, #node-dialog {
+  top: var(--mobile-view-top, 0px); bottom: auto; margin: 8px auto;
+  max-height: calc(var(--mobile-view-height, 100dvh) - 16px);
+ }
+ #modal-content { max-height: calc(var(--mobile-view-height, 100dvh) - 18px); }
+ #inspector-content { min-height: 0; scroll-padding: 8px; }
+}
+
+.status-badge.scheduled { background: #e6f1ff; color: #185ca0; border: 1px solid #9fc5f4; }

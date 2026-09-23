@@ -19,14 +19,18 @@ async function main() {
     browser = await chromium.launch({ headless: true, ...(process.env.WORK_TREE_BROWSER_CHANNEL ? { channel: process.env.WORK_TREE_BROWSER_CHANNEL } : {}) });
     const page = await browser.newPage({ viewport: { width: 1365, height: 1000 } }), errors = []; page.on('pageerror', e => errors.push(e.message));
     await page.goto(base); await page.locator('[data-tree="' + tree.id + '"]').click();
+    await expect(page.locator('[data-action="edit-tree"] + [data-action="settings"]')).toHaveText('設定編集');
     await page.locator('[data-action="edit-tree"]').click(); await page.locator('[data-action="settings"]').click();
     await page.locator('#setting-backend').selectOption('orca');
+    await page.locator('#setting-completion-mode').selectOption('manual');
     const picker = page.locator('[data-orca-picker="tree"]');
     await expect(picker.locator('[data-orca-key="projectId"] option[value="project:test"]')).toBeAttached();
     await picker.locator('[data-orca-key="projectId"]').selectOption('project:test'); await picker.locator('[data-orca-key="hostId"]').selectOption('ssh:fixture');
     await picker.locator('[data-orca-key="worktreeId"]').selectOption('ssh-repo::/mnt/repo');
     await page.locator('[data-modal-action="settings-save"]').click(); await expect(page.locator('#modal')).not.toBeVisible();
     await page.locator('[data-action="edit-tree"]').click();
+    assert.equal(app.store.data.trees.find(t=>t.id===tree.id).completionMode,'manual');
+    await expect(page.locator('#inline-edit-tools [data-action="settings"]')).toHaveCount(0);
     await page.locator('[data-node="' + node.id + '"]').click();
     await page.locator('[data-field="criteria"]').fill('ホーム画面が表示される\nエラーが表示されない');
     const nodePicker = page.locator('[data-orca-picker="node"]');
@@ -70,11 +74,23 @@ async function main() {
     await page.route('**/api/runs/*/reassess', async route => { assert.equal(route.request().postDataJSON().nodeId, node.id); reassessRequested = true; await route.fulfill({ json: { ok: true } }); });
     await expect(page.locator('.inspector-tabs button')).toHaveText(['設定', '実行結果', '実行履歴']);
     await page.locator('#result-tab').click();
+    await expect(page.locator('#revision-criteria')).toHaveCount(0);
+    await expect(page.locator('#node-footer [data-add-followup]')).toBeVisible();
+    await expect(page.locator('#assessment-result-text')).toHaveText('条件達成を確認', {timeout:10000});
+    await page.locator('#node-footer [data-judge]').click();
     await expect(page.locator('[data-reassess]')).toBeVisible({ timeout: 10000 });
     await expect(page.locator('#work-result-text')).toHaveText('fixture completed');
     await expect(page.locator('#assessment-result-text')).toHaveText('条件達成を確認');
     await page.locator('[data-reassess]').click();
     await expect.poll(() => reassessRequested).toBe(true);
+    for (const label of ['unexpected','completed']) {
+      await page.locator('#node-footer [data-judge]').click();
+      await page.locator('#judgement-label').selectOption(label);
+      await page.locator('#judgement-note').fill('Human reviewed fixture result');
+      await page.locator('[data-save-label]').click();
+      await expect(page.locator('#modal')).not.toBeVisible();
+      await expect(page.locator('.task-result-header .outcome-badge')).toHaveClass(new RegExp(label));
+    }
     await page.locator('#followup-prompt').fill('- 追加の検証を実施\n- エラー時の表示も確認する');
     await page.locator('#history-tab').click();
     await page.locator('#result-tab').click();
@@ -91,8 +107,34 @@ async function main() {
     assert.equal(ordered[3].id, following.id);
     await expect(page.locator('#work-result-text')).toHaveText('fixture completed');
     await page.locator('#close-node').click();
+    await expect(page.locator('[data-node="' + node.id + '"] .outcome-badge')).toHaveText('完了');
+    const progressState = await (await fetch(base + '/api/state')).json();
+    const execution = require('../public/next-execution.js');
+    assert.equal(execution.nextExecution(after, execution.executionProgress(after, progressState.runs)).task.id, ordered[1].id);
     const boxes = await page.locator('.task-cell').evaluateAll(els=>els.map(el=>{const r=el.getBoundingClientRect();return {x:r.x,y:r.y,bottom:r.bottom};}));
     for(let i=1;i<boxes.length;i++) { assert.equal(boxes[i].x,boxes[0].x); assert(boxes[i].y>=boxes[i-1].bottom); }
+    await page.locator('[data-action="edit-tree"]').click();
+    await page.locator('[data-ai-edit]').click();
+    await expect(page.locator('#ai-scope')).toBeVisible();
+    await page.locator('#ai-scope').selectOption(node.id);
+    await page.locator('#ai-request').fill('選択したTASKの指示を明確にする');
+    await page.locator('#modal .close-modal').first().click();
+    await page.locator('[data-action="edit-tree"]').click();
+    await page.locator('#new-tree').click();
+    await page.locator('#brief-purpose').fill('SSH先の資料を整理する計画');
+    await expect(page.locator('#setting-backend')).toHaveValue('orca');
+    await page.locator('[data-modal-action="generate"]').click();
+    await expect(page.locator('#modal')).not.toBeVisible({timeout:20000});
+    const imported=app.store.data.trees.find(t=>t.brief?.purpose==='SSH先の資料を整理する計画');
+    assert(imported); assert.equal(imported.executionBackend,'orca'); assert.equal(imported.orca.hostId,'ssh:fixture');
+    assert(imported.nodes.some(n=>n.kind==='task')); assert.equal(app.store.data.runs.find(r=>r.importedTreeId===imported.id).executionBackend,'direct');
+    const scoped = {id:'scope-fixture',treeId:tree.id,treeRevision:after.revision,kind:'node',runner:{type:'local'},pid:process.pid,createdAt:new Date().toISOString()};
+    app.store.data.runs.unshift(scoped);
+    require('../lib/core.cjs').atomic(path.join(app.store.runDir(scoped.id),'state.json'),{status:'review',pid:process.pid,currentNodeId:node.id,nodes:{[node.id]:{status:'review',outcome:'needs_review'},[ordered[1].id]:{status:'pending'}}});
+    await page.reload();await page.locator('[data-tree="'+tree.id+'"]').click();
+    await expect(page.locator('[data-node="'+ordered[1].id+'"] .scheduled')).toHaveText('実行予定');
+    await expect(page.locator('[data-node="'+ordered[2].id+'"] .scheduled')).toHaveCount(0);
+    app.store.data.runs.shift();
     await page.screenshot({ path: path.join(dir, 'orca-settings.png'), fullPage: true });
     assert.deepEqual(errors, []); console.log('Orca UI passed: selection, inheritance, host switch, persistence, execution, focus, completion. Artifacts: ' + dir);
   } finally { await browser?.close(); await app.close(); }

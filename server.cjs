@@ -14,7 +14,7 @@ const { DEFAULTS, cliArgs } = require('./lib/cli-options.cjs');
 const { Notion } = require('./lib/notion.cjs');
 const { readEvents } = require('./lib/events.cjs');
 const { selectExecution } = require('./lib/task-selection.cjs');
-const { nextExecution, executionProgress } = require('./public/next-execution.js');
+const { nextExecution, executionProgress, taskDefinitions, taskMatches } = require('./public/next-execution.js');
 const { Proposals } = require('./lib/proposals.cjs');
 const { HerdrBindings } = require('./lib/herdr-bindings.cjs');
 const { isWSL, localPath, executionTree } = require('./lib/local-path.cjs');
@@ -36,6 +36,7 @@ function createApp({ dataDir = process.env.WORK_TREE_DATA || path.join(__dirname
   const store = new Store(path.resolve(dataDir));
   const notion = new Notion(dataDir, notionOptions);
   const herdr = new HerdrBindings(dataDir);
+  const orcaObservation = new (require('./lib/orca-observation.cjs').OrcaObservation)(store);
   const proposals = new Proposals(store, startRun, localState, assertEditable, tree => { void herdr.sync(tree, store.data.trees); });
   const token = crypto.randomBytes(32).toString('hex');
   let refreshing = false, closing = false;
@@ -67,7 +68,7 @@ function createApp({ dataDir = process.env.WORK_TREE_DATA || path.join(__dirname
   }
   function localState(run) {
     const state = store.state(run);
-    if (run.runner.type === 'local' && ACTIVE.has(state.status)) {
+    if (run.runner.type === 'local' && ACTIVE.has(state.status) && !state.offlineReview) {
       const pid = state.pid || run.pid;
       let alive = true;
       if (pid) { try { process.kill(pid, 0); } catch (e) { alive = e.code === 'EPERM'; } }
@@ -79,8 +80,17 @@ function createApp({ dataDir = process.env.WORK_TREE_DATA || path.join(__dirname
     return state;
   }
   function stateResponse() {
-    const runs = store.data.runs.map(r => ({ ...r, state: localState(r) }));
-    return { proposals: proposals.public(), trees: store.data.trees, machines: store.data.machines, runs, herdr: { syncErrors: herdr.errors }, version: '0.7.2', server: { capabilities: ['node-execution', 'herdr-execution', 'orca-execution', 'next-execution', 'orca-auto-results'], dataDir, pid: process.pid, platform: process.platform, wsl: isWSL, cwd: process.cwd(), hostname: require('node:os').hostname(), runtime: runtimeProfile() } };
+    const runs = store.data.runs.map(r => ({ ...runWithDefinitions(r), state: orcaObservation.decorate(r, localState(r)) }));
+    return { proposals: proposals.public(), trees: store.data.trees, machines: store.data.machines, runs, herdr: { syncErrors: herdr.errors }, version: '0.7.18', server: { capabilities: ['node-execution', 'herdr-execution', 'orca-execution', 'next-execution', 'orca-auto-results'], dataDir, pid: process.pid, platform: process.platform, wsl: isWSL, cwd: process.cwd(), hostname: require('node:os').hostname(), runtime: runtimeProfile() } };
+  }
+  const definitionCache = new Map();
+  function runWithDefinitions(run) {
+    if (run.taskDefinitions) return run;
+    if (!definitionCache.has(run.id)) {
+      const snapshot = read(path.join(store.runDir(run.id), 'input.json'))?.tree;
+      if (snapshot) definitionCache.set(run.id, taskDefinitions(snapshot));
+    }
+    return { ...run, ...(definitionCache.has(run.id) ? { taskDefinitions: definitionCache.get(run.id) } : {}) };
   }
   let startQueue = Promise.resolve();
   function startRun(...args) {
@@ -88,10 +98,11 @@ function createApp({ dataDir = process.env.WORK_TREE_DATA || path.join(__dirname
     startQueue = pending.catch(() => {});
     return pending;
   }
-  async function startRunImpl(tree, kind, resume = false, nodeId = null, progress = null, reassessment = null) {
+  async function startRunImpl(tree, kind, resume = false, nodeId = null, progress = null, reassessment = null, reassessmentDefinitions = null) {
     validateTree(tree, store.data.machines);
     assert(orderedTasks(tree).length > 0, '実行するタスクを追加してください');
     const runner = machineById(tree.runnerId);
+    const definitions = reassessmentDefinitions || taskDefinitions(tree);
     const useOrca = tree.executionBackend === 'orca';
     tree = useOrca ? structuredClone(tree) : executionTree(tree, runner);
     let orcaContext;
@@ -133,6 +144,7 @@ function createApp({ dataDir = process.env.WORK_TREE_DATA || path.join(__dirname
     }
     const run = { id: id(), treeId: tree.id, treeRevision: tree.revision, kind, createdAt: now(), runner: structuredClone(runner), treeName: tree.name };
     run.executionBackend = useOrca ? 'orca' : useHerdr ? 'herdr' : 'direct';
+    run.taskDefinitions = definitions;
     if (['tree','node'].includes(kind) && !useOrca) run.resultSuggestions = true;
     if (nodeId) run.nodeId = nodeId;
     if (notion.links[tree.id]) run.notionSource = notion.links[tree.id].sourceId;
@@ -142,6 +154,8 @@ function createApp({ dataDir = process.env.WORK_TREE_DATA || path.join(__dirname
     const completed = progress ? Object.keys(progress).filter(key => progress[key].status === 'succeeded' && tree.nodes.some(n => n.id === key)) : resume ? Object.keys(previousState.nodes).filter(key => previousState.nodes[key].status === 'succeeded') : [];
     const input = { id: run.id, kind, tree: hydrate(dataDir, structuredClone(tree)), machines: structuredClone(store.data.machines), runnerId: runner.id, completed, previousResults: resume ? Object.fromEntries(Object.entries(previousState.nodes).map(([k, v]) => [k, v.response || ''])) : {} };
     if (progress) input.previousResults = Object.fromEntries(Object.entries(progress).filter(([, v]) => v.status === 'succeeded').map(([key, value]) => [key, value.response || '']));
+    const previousNodes = progress || (resume ? previousState?.nodes : {}) || {};
+    input.previousReports = Object.fromEntries(tree.nodes.filter(n=>n.kind==='task' && completed.includes(n.id)).map(n=>[n.id,require('./lib/task-reports.cjs').previousReport(tree,n,previousNodes[n.id])]));
     if (useOrca) input.orca = orcaContext;
     const dir = store.runDir(run.id); atomic(path.join(dir, 'input.json'), input);
     if (useHerdr) run.pid = process.pid;
@@ -291,7 +305,7 @@ function createApp({ dataDir = process.env.WORK_TREE_DATA || path.join(__dirname
               if (next !== tree) { store.data.trees[store.data.trees.indexOf(tree)] = next; store.save(); }
               if (data.next !== undefined) {
                 assert(['task', 'wp'].includes(data.next) && !data.resume && data.nodeId === undefined, '次の実行範囲が不正です');
-                const progress = executionProgress(next, store.data.runs.map(r => ({ ...r, state: localState(r) })));
+                const progress = executionProgress(next, store.data.runs.map(r => ({ ...runWithDefinitions(r), state: localState(r) })));
                 const selection = nextExecution(next, progress), target = data.next === 'wp' ? selection.wp : selection.task;
                 assert(target, selection.complete ? 'すべての TASK が完了しています' : '実行可能な次の ' + data.next.toUpperCase() + ' がありません');
                 return send(res, 201, await startRun(selectExecution(next, target.id), 'node', false, target.id, progress));
@@ -307,21 +321,86 @@ function createApp({ dataDir = process.env.WORK_TREE_DATA || path.join(__dirname
         }
         if (parts[1] === 'runs' && parts[2]) {
           const run = runById(parts[2]);
+          if (req.method === 'POST' && parts[3] === 'label') {
+            const data = await body(req), tree = treeById(run.treeId);
+            let state = localState(run), node = state.nodes?.[data.nodeId];
+            assert(['node','tree'].includes(run.kind) && node && node.status !== 'pending' && !node.reused, 'ラベルを付ける実行結果がありません');
+            const latest = require('./public/next-execution.js').taskRun(tree, store.data.runs.map(r=>({...runWithDefinitions(r),state:localState(r)})), data.nodeId);
+            assert(latest?.id === run.id, '最新のTASK設定・実行結果に対してラベルを付けてください');
+            assert(!store.data.runs.some(r=>r.id!==run.id && r.treeId===tree.id && ACTIVE.has(localState(r).status)), '同じツリーの実行が終了してから変更してください');
+            assert(!ACTIVE.has(state.status) || state.status === 'review' && state.currentNodeId === data.nodeId, 'TASKの実行・判定が終了してからラベルを付けてください');
+            const control = {id:id(),action:'label',nodeId:data.nodeId,outcome:data.outcome,note:data.note || ''};
+            require('./lib/manual-label.cjs').labelResult(structuredClone(node), control.outcome, control.note);
+            const pending = read(path.join(store.runDir(run.id),'control.json'));
+            assert(!(pending?.action === 'reassess' && pending.id !== node.reassessmentRequestId && ACTIVE.has(state.status)), '完了判定の開始を待っています');
+            let legacyReview = false;
+            if (ACTIVE.has(state.status) && !state.offlineReview && state.manualLabelVersion !== 2) {
+              assert(run.runner.type === 'local', '更新前のSSH常駐実行は停止してから結果を確認してください');
+              // An old worker does not understand label controls. It is idle in
+              // review: stop its wait loop before writing, never race its saves.
+              const savedNode = structuredClone(node);
+              atomic(path.join(store.runDir(run.id),'before-manual-label.json'),state);
+              atomic(path.join(store.runDir(run.id),'control.json'),{id:id(),action:'stop'});
+              const deadline = Date.now()+10000;
+              do { await new Promise(resolve=>setTimeout(resolve,100)); state=localState(run); } while(ACTIVE.has(state.status) && Date.now()<deadline);
+              assert(!ACTIVE.has(state.status), '旧実行の確認待ちを終了しています。少し待って再度保存してください');
+              state.nodes[data.nodeId] = savedNode; node = savedNode; legacyReview = true;
+            }
+            if (ACTIVE.has(state.status) && !state.offlineReview) {
+              if (run.runner.type === 'ssh') await remoteAccess(run.runner,run.id,{control});
+              else atomic(path.join(store.runDir(run.id),'control.json'),control);
+            } else {
+              assert(run.runner.type === 'local', 'SSH常駐実行の終了後ラベル変更には対応していません');
+              require('./lib/manual-label.cjs').labelResult(node,control.outcome,control.note);
+              state.error = null; state.updatedAt = now();
+              state.offlineReview = control.outcome === 'needs_review';
+              state.currentNodeId = state.offlineReview ? data.nodeId : null;
+              state.status = state.offlineReview ? 'review' : control.outcome !== 'completed' ? 'failed' : Object.values(state.nodes).every(n=>n.status==='succeeded') ? 'succeeded' : 'interrupted';
+              atomic(path.join(store.runDir(run.id),'state.json'),state);
+            }
+            return send(res,200,{ok:true, ...(legacyReview ? {message:'ラベルを保存しました。更新前の実行の残りは「次TASKを実行」から続けられます。'} : {})});
+          }
           if (req.method === 'POST' && parts[3] === 'reassess') {
             const data = await body(req), state = localState(run);
-            assert(run.executionBackend === 'orca' && state.nodes[data.nodeId]?.canReassess, 'この TASK の再判定情報がありません');
-            if (state.status === 'review' && state.currentNodeId === data.nodeId) {
-              atomic(path.join(store.runDir(run.id), 'control.json'), { id: id(), action: 'reassess', nodeId: data.nodeId });
+            assert(run.executionBackend === 'orca' && (state.nodes[data.nodeId]?.canReassess || state.nodes[data.nodeId]?.interactive?.binding || state.nodes[data.nodeId]?.interactive?.handle), 'この TASK の再判定情報がありません');
+            assert(!ACTIVE.has(state.status) || state.status === 'review' && state.currentNodeId === data.nodeId, '作業または判定の終了を待ってください');
+            const pendingControl = read(path.join(store.runDir(run.id), 'control.json'));
+            assert(!(pendingControl?.action === 'reassess' && pendingControl.id !== state.nodes[data.nodeId]?.reassessmentRequestId && !state.offlineReview && ACTIVE.has(state.status)), '再判定の開始を待っています');
+            const current = structuredClone(treeById(run.treeId)), currentNode = current.nodes.find(n => n.id === data.nodeId);
+            assert(currentNode, 'TASK が見つかりません');
+            const previous = read(path.join(store.runDir(run.id), 'input.json'));
+            const comparable = structuredClone(current);
+            comparable.nodes.find(n => n.id === data.nodeId).criteria = previous.tree.nodes.find(n => n.id === data.nodeId)?.criteria || '';
+            assert(taskMatches(comparable, runWithDefinitions(run), data.nodeId), '指示・実行先などの変更後は TASK を再実行してください');
+            if (data.criteria !== undefined) {
+              assert(typeof data.criteria === 'string' && data.criteria.length <= 60000, '完了条件は60000文字以内で入力してください');
+              if (data.criteria !== currentNode.criteria) { currentNode.criteria = data.criteria; current.revision++; current.updatedAt = now(); }
+            }
+            const criteria = currentNode.criteria;
+            if (state.status === 'review' && state.currentNodeId === data.nodeId && !state.offlineReview) {
+              store.data.trees[store.data.trees.findIndex(t => t.id === current.id)] = current;
+              run.taskDefinitions = { ...runWithDefinitions(run).taskDefinitions, [data.nodeId]:taskDefinitions(current)[data.nodeId] }; store.save();
+              previous.tree.nodes.find(n => n.id === data.nodeId).criteria = criteria;
+              atomic(path.join(store.runDir(run.id), 'input.json'), previous);
+              atomic(path.join(store.runDir(run.id), 'control.json'), { id: id(), action: 'reassess', nodeId: data.nodeId, refreshReport:true, criteria });
               return send(res, 200, { ok: true });
             }
-            assert(!ACTIVE.has(state.status), '実行中の TASK が終了してから再判定してください');
-            const current = treeById(run.treeId); assert(current.revision === run.treeRevision, 'ツリー編集後は TASK を再実行してください');
-            const previous = read(path.join(store.runDir(run.id), 'input.json'));
+            assert(!ACTIVE.has(state.status) || state.offlineReview, '実行中の TASK が終了してから再判定してください');
             const result = read(path.join(store.runDir(run.id), 'orca', data.nodeId, 'result.json'));
-            assert(result?.reassessment, '作業ペインの情報がありません');
+            const work = result?.reassessment || (state.nodes[data.nodeId]?.interactive?.notificationMode === 'manual' ? { binding:state.nodes[data.nodeId].interactive, baselineResponse:state.nodes[data.nodeId].workResponse } : null);
+            assert(work, '作業ペインの情報がありません');
+            if (state.offlineReview) {
+              state.offlineReview = false; state.status = 'interrupted'; state.currentNodeId = null;
+              state.nodes[data.nodeId].resultStale = true;
+              state.nodes[data.nodeId].canReassess = true;
+              atomic(path.join(store.runDir(run.id), 'state.json'), state);
+            }
             const tree = structuredClone(previous.tree);
-            tree.nodes = tree.nodes.filter(n => n.id === data.nodeId).map(n => ({ ...n, parentId: null, dependsOn: [] }));
-            return send(res, 201, await startRun(tree, 'node', false, data.nodeId, null, result.reassessment));
+            tree.revision = current.revision;
+            tree.nodes = tree.nodes.filter(n => n.id === data.nodeId).map(n => ({ ...n, criteria, parentId: null, dependsOn: [] }));
+            store.data.trees[store.data.trees.findIndex(t => t.id === current.id)] = current;
+            store.save();
+            return send(res, 201, await startRun(tree, 'node', false, data.nodeId, null, { ...work, report:state.nodes[data.nodeId]?.report, refreshReport:true }, taskDefinitions(current)));
           }
           if (req.method === 'GET' && parts[3] === 'events') {
             const after = Number(url.searchParams.get('after') || 0); assert(Number.isSafeInteger(after) && after >= 0, '読み取り位置が不正です');
@@ -330,12 +409,34 @@ function createApp({ dataDir = process.env.WORK_TREE_DATA || path.join(__dirname
             return send(res, 200, { ...(feed || { events: [], cursor: 0, more: false }), nodes: (snapshot?.nodes || []).map(n => ({ id: n.id, title: n.title, prompt: n.chatMessage || n.prompt })) });
           }
           if (req.method === 'POST' && parts[3] === 'control') {
-            const data = await body(req); assert(['pause', 'resume', 'stop', 'approve', 'complete'].includes(data.action), '操作が不正です');
+            const data = await body(req); assert(['pause', 'resume', 'stop', 'approve', 'complete', 'revise'].includes(data.action), '操作が不正です');
             const state = localState(run); assert(ACTIVE.has(state.status), '実行は終了しています');
             if (data.action === 'approve') assert(state.status === 'review' && data.nodeId === state.currentNodeId, '確認待ちのノードが一致しません');
+            if (data.action === 'approve') assert(!state.nodes[data.nodeId]?.resultStale, '修正後の結果を再判定してから完了を承認してください');
+            if (data.action === 'approve') {
+              const pending = read(path.join(store.runDir(run.id), 'control.json'));
+              assert(!(pending?.nodeId === data.nodeId && (pending.action === 'revise' || pending.action === 'reassess' && pending.id !== state.nodes[data.nodeId]?.reassessmentRequestId)), '修正・再判定の処理が完了するまで承認できません');
+            }
+            if (data.action === 'revise') assert(state.status === 'review' && data.nodeId === state.currentNodeId, '確認待ちの TASK を指定してください');
+            if (state.offlineReview) {
+              if (data.action === 'revise') {
+                state.nodes[data.nodeId].resultStale = true; state.updatedAt = now();
+                atomic(path.join(store.runDir(run.id), 'state.json'), state);
+                return send(res, 200, { ok:true });
+              }
+              assert(['approve', 'stop'].includes(data.action), '復元した確認待ちは、実行結果タブで完了を承認するか停止してください');
+              const node = state.nodes[state.currentNodeId];
+              if (data.action === 'approve') Object.assign(node, { status: 'succeeded', outcome: 'completed', confirmedByUser: true, confirmedAt: now() });
+              else node.status = 'cancelled';
+              state.status = data.action === 'stop' ? 'cancelled' : Object.values(state.nodes).every(n => n.status === 'succeeded') ? 'succeeded' : 'interrupted';
+              state.currentNodeId = null; state.offlineReview = false; state.finishedAt = now(); state.updatedAt = now();
+              atomic(path.join(store.runDir(run.id), 'state.json'), state);
+              return send(res, 200, { ok: true });
+            }
             const control = { id: id(), action: data.action, nodeId: data.nodeId };
             if (data.action === 'complete') {
-              assert(['herdr', 'orca'].includes(run.executionBackend) && data.nodeId === state.currentNodeId && ['ready', 'confirmation'].includes(state.nodes[data.nodeId]?.interactive?.phase), '対話 Agent が入力待ちになってから完了を確定してください');
+              const interactive = state.nodes[data.nodeId]?.interactive;
+              assert(['herdr', 'orca'].includes(run.executionBackend) && data.nodeId === state.currentNodeId && (['ready', 'confirmation'].includes(interactive?.phase) || interactive?.phase === 'start-unconfirmed' && interactive.canComplete === true), '対話 Agent が入力待ちになってから完了を確定してください');
               assert(typeof data.response === 'string' && data.response.trim() && data.response.length <= 60000, '結果の要約を 60000 文字以内で入力してください');
               control.response = data.response;
               assert(data.outcome === undefined || ['completed','error','unexpected'].includes(data.outcome), '結果ラベルが不正です');
@@ -369,9 +470,16 @@ function createApp({ dataDir = process.env.WORK_TREE_DATA || path.join(__dirname
             JSON.stringify({ name: 'プロジェクト名', nodes: [{ id: 'group1', title: '親タスク', kind: 'group', parentId: null, prompt: '共通の背景', criteria: '', dependsOn: [] }, { id: 'task1', title: '具体的な作業', kind: 'task', parentId: 'group1', prompt: 'AI が実行する具体的な指示', criteria: '検証可能な完了条件', dependsOn: [] }] }) +
             '\n各 ID は一意。グループのみが子を持ち、実行タスクは末端。依存先は実行タスク ID のみ。循環禁止。5〜20 ノードを目安とし、必要以上に細分化しないでください。\n要件:\n' + data.prompt;
           const tool = data.tool || 'codex';
-          const settings = { name: data.name || '', description: data.description || '', executionBackend: data.executionBackend || 'direct', herdrSession: data.herdrSession, orca: data.orca, tool, machineId: machine.id, runnerId: data.executionBackend === 'orca' ? 'local' : data.runnerId || machine.id, cwd: data.cwd || '', timeoutMinutes: data.timeoutMinutes || 60, cli: data.cli, attachments: data.attachments };
+          const settings = { completionMode: data.completionMode || 'ai', name: data.name || '', description: data.description || '', executionBackend: data.executionBackend || 'direct', herdrSession: data.herdrSession, orca: data.orca, tool, machineId: machine.id, runnerId: data.executionBackend === 'orca' ? 'local' : data.runnerId || machine.id, cwd: data.cwd || '', timeoutMinutes: data.timeoutMinutes || 60, cli: data.cli, attachments: data.attachments };
           validateTree(blankTree({ ...settings, name: settings.name || '新しいタスクプラン' }), store.data.machines);
           const tree = blankTree({ ...settings, name: 'AI による計画生成', brief: data.brief, creationSettings: settings, timeoutMinutes: 15, nodes: [blankNode({ title: 'タスクツリーを設計する', prompt: instruction, sandbox: 'read-only', claudePermission: 'plan', cli: { [tool]: { mode: 'plan' } } })] });
+          if (settings.executionBackend === 'orca') {
+            // Planning is non-interactive; imported tasks retain the original target.
+            tree.executionBackend = 'direct'; tree.machineId = 'local'; tree.runnerId = 'local'; tree.cwd = process.cwd();
+            delete tree.orca;
+            tree.attachments = (settings.attachments || []).filter(a => a.id);
+            tree.nodes[0].prompt += '\n\n作成後の TASK の実行先（計画生成中にこの接続先の操作やファイル変更は行わない）:\n' + JSON.stringify({ orca:settings.orca, references:(settings.attachments || []).filter(a=>!a.id) });
+          }
           return send(res, 201, await startRun(tree, 'plan'));
         }
         if (req.method === 'POST' && url.pathname === '/api/machines') {
@@ -397,19 +505,21 @@ function createApp({ dataDir = process.env.WORK_TREE_DATA || path.join(__dirname
       const publicFiles = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/tree-edit.js': ['tree-edit.js', 'text/javascript'], '/workspace-ui.js': ['workspace-ui.js', 'text/javascript'], '/workspace.css': ['workspace.css', 'text/css'], '/chat-format.js': ['chat-format.js', 'text/javascript'], '/cli-ui.js': ['cli-ui.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'], '/favicon.svg': ['favicon.svg', 'image/svg+xml'] };
       publicFiles['/orca-ui.js'] = ['orca-ui.js', 'text/javascript'];
       publicFiles['/next-execution.js'] = ['next-execution.js', 'text/javascript'];
+      publicFiles['/mobile-input.js'] = ['mobile-input.js', 'text/javascript'];
       const file = publicFiles[url.pathname]; if (!file || req.method !== 'GET') fail('ページが見つかりません', 404);
       res.writeHead(200, { 'Content-Type': file[1] + '; charset=utf-8', 'Cache-Control': 'no-cache' }); res.end(fs.readFileSync(path.join(__dirname, 'public', file[0])));
     } catch (e) { if (!res.headersSent) send(res, e.statusCode || 400, { error: e.message }); else res.end(); }
   });
   const proposalPoll = setInterval(() => { if (!closing) proposals.tick().catch(() => {}); }, 1000); proposalPoll.unref();
   const poll = setInterval(refreshRemote, 4000); poll.unref();
+  const observationPoll = setInterval(() => { if (!closing) void orcaObservation.refresh(); }, 4000); observationPoll.unref();
   const sync = setInterval(() => {
     if (!closing) {
       notion.syncResults(store).catch(() => {});
       for (const tid of Object.keys(herdr.errors)) { const tree = store.data.trees.find(t => t.id === tid); if (tree) void herdr.sync(tree, store.data.trees); }
     }
   }, 5000); sync.unref();
-  return { server, store, notion, listen: () => new Promise((resolve, reject) => { server.once('error', e => { releaseLock(); reject(e); }); server.listen(port, BIND_ADDRESS, () => { refreshRemote(); for (const tree of store.data.trees) void herdr.sync(tree, store.data.trees); resolve(server.address()); }); }), close: () => { closing = true; clearInterval(poll); clearInterval(sync); clearInterval(proposalPoll); return new Promise(resolve => server.close(async () => { await proposals.drain(); releaseLock(); resolve(); })); } };
+  return { server, store, notion, listen: () => new Promise((resolve, reject) => { server.once('error', e => { releaseLock(); reject(e); }); server.listen(port, BIND_ADDRESS, () => { refreshRemote(); void orcaObservation.refresh(); for (const tree of store.data.trees) void herdr.sync(tree, store.data.trees); resolve(server.address()); }); }), close: () => { closing = true; clearInterval(poll); clearInterval(sync); clearInterval(proposalPoll); clearInterval(observationPoll); return new Promise(resolve => server.close(async () => { await proposals.drain(); releaseLock(); resolve(); })); } };
 }
 if (require.main === module) {
   try {

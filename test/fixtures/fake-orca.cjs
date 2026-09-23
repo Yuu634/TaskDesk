@@ -17,10 +17,13 @@ function respond(args, state, data = catalog, launch) {
   if (action === 'create') {
     const w = data.worktrees.find(w => 'identity:' + w.identity.key === opt('--worktree'));
     if (!w) throw Error('missing worktree');
-    const tool = (launch || JSON.parse(opt('--launch-spec'))).agent;
+    const spec = launch || JSON.parse(opt('--launch-spec')), tool = spec.agent;
+    const payload = spec.env?.WORK_TREE_ORCA_INPUT && JSON.parse(Buffer.from(spec.env.WORK_TREE_ORCA_INPUT,'base64').toString());
     const terminal = { handle: 'term-' + Object.keys(state).length, incarnationId: 'incarnation-' + Object.keys(state).length, tabId: 'tab-' + Object.keys(state).length, worktreeId: w.id, executionHostId: w.hostId, connected: true, writable: true, agentIdentity: tool };
+    terminal.prompt = payload?.initialPrompt;
     state[terminal.handle] = terminal; return { terminal };
   }
+  if (action === 'list') return { terminals:Object.values(state), truncated:false };
   const terminal = state[opt('--terminal')];
   if (!terminal) throw Error('missing terminal');
   if (action === 'split') {

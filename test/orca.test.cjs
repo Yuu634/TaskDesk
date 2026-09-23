@@ -23,6 +23,19 @@ test('prompt matching tolerates only leading terminal colour replies', () => {
   assert.equal(submittedPrompt(']10;not-a-colour\\prompt'), ']10;not-a-colour\\prompt');
 });
 const selection = i => { const w = catalog.worktrees[i]; return { projectId: w.projectId, hostId: w.hostId, worktreeId: w.id, identityKey: w.identity.key, notificationMode: 'manual' }; };
+test('manual Codex response leaves execution timeout and requests review without claiming criteria passed', async t => {
+  const s = setup(t, 'codex', { modify(args, value) {
+    if (args[1] === 'read' && args.includes('--screen')) return { terminal: { handle: args[3], source: 'screen', tail: ['• Work finished.', 'Worked for 1m · done', '› Ask Codex to do anything'] } };
+    return value;
+  } });
+  s.context.notifications = { prepare: async () => null };
+  const result = await runInOrca(s.context, s.config, 'fixture prompt');
+  assert.equal(result.outcome, 'needs_review');
+  assert.match(result.workResponse, /Work finished/);
+  assert.equal(result.confirmedByUser, undefined);
+  assert.equal(read(path.join(s.dir, 'orca', s.node.id, 'dispatch.json')).status, 'review');
+  assert(!s.calls.some(a => ['send', 'close'].includes(a[1])));
+});
 const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'work-tree-orca-test-'));
 async function until(fn, timeout = 12000) { const end = Date.now() + timeout; while (Date.now() < end) { const r = await fn(); if (r) return r; await delay(20); } throw Error('Test timed out'); }
 function setup(t, tool = 'codex', behavior = {}) {
@@ -56,7 +69,8 @@ for (const tool of ['codex', 'claude']) test(tool + ' routes to SSH, sends liter
   const pending = runInOrca(s.context, s.config, prompt, { signal: s.controller.signal, onInteractive: v => phases.push(v) }).then(value => { settled = true; return value; });
   await until(() => phases.at(-1)?.phase === 'ready');
   assert.equal(settled, false);
-  const sends = s.calls.filter(a => a[1] === 'send'); assert.equal(sends.length, 1); assert.equal(sends[0][sends[0].indexOf('--text') + 1], prompt);
+  const sends = s.calls.filter(a => a[1] === 'send'); assert.equal(sends.length, 0); assert.equal(Object.values(s.state)[0].prompt, prompt);
+  assert(phases.some(p=>p.phase==='submitted' && p.promptSent && p.executionStarted===false));
   assert.equal(phases.at(-1).hostId, 'ssh:fixture');
   atomic(path.join(s.dir, 'control.json'), { id: 'complete', action: 'complete', nodeId: s.node.id, response: '検証完了' });
   assert.equal((await pending).response, '検証完了');
@@ -74,7 +88,10 @@ test('startup argument delivery works without Orca agent identity and never type
     return { ready: true, started: { token: c.token, pid: 123 }, events: [event], activity: { supported: true, completed: true, turnId: 'turn', fingerprint: 'stable' }, assessment: assessed ? { key: event.key, outcome: 'completed', detail: 'evidence', after: { fingerprint: 'stable' } } : null };
   } };
   s.config.criteria = '条件';
-  const result = await runInOrca(s.context, s.config, 'literal prompt');
+  const phases=[];
+  const result = await runInOrca(s.context, s.config, 'literal prompt', {onInteractive:p=>phases.push(p)});
+  assert(phases.some(p=>p.promptSent && p.executionStarted===false));
+  assert(phases.some(p=>p.phase==='execution-started' && p.executionStarted===true));
   assert.equal(result.outcome, 'completed');
   const sends = s.calls.filter(a => a[1] === 'send');
   assert.equal(sends.length, 0); assert.equal(s.calls.filter(a => a[1] === 'split').length, 1);
@@ -88,14 +105,14 @@ for (const outcome of ['completed', 'needs_review']) test('Orca automatically re
     const judge = judgeFixture(_, action, c, outcome); if (judge) { if (action === 'prepare-pane') verifyCount++; return judge; }
     if (action === 'assess') { verifyCount++; return {}; }
     if (action === 'ack') return {};
-    return { ready: true, events: s.calls.some(a => a[1] === 'send') ? [event, event] : [], activity: { supported: true, completed: true, turnId: 'turn', fingerprint: 'stable' }, assessment: verifyCount ? { key: event.key, outcome, detail: 'checks', after: { fingerprint: 'stable' } } : null };
+    return { ready: true, events: s.calls.some(a => a[1] === 'create') ? [event, event] : [], activity: { supported: true, completed: true, turnId: 'turn', fingerprint: 'stable' }, assessment: verifyCount ? { key: event.key, outcome, detail: 'checks', after: { fingerprint: 'stable' } } : null };
   } };
   s.config.criteria = '結果を確認できる';
   const result = await runInOrca(s.context, s.config, 'fixture prompt');
   assert.equal(result.outcome, outcome); assert.equal(result.automatic, true);
   assert.match(result.response, /verified result/); assert.equal(verifyCount, 1);
   const sends = s.calls.filter(a => a[1] === 'send');
-  assert.equal(sends.length, 1); assert.equal(s.calls.filter(a => a[1] === 'split').length, 1);
+  assert.equal(sends.length, 0); assert.equal(s.calls.filter(a => a[1] === 'split').length, 1);
   assert.equal(s.calls.filter(a => a[1] === 'create').length, 1);
   assert(!s.calls.some(a => a[1] === 'close'));
 });
@@ -117,7 +134,7 @@ for (const scenario of ['resumed-work', 'lost-split', 'reassess']) test('split a
   if (scenario === 'reassess') {
     const dir = temp();
     const second = await runInOrca({ ...s.context, runDir: dir, reassessment: result.reassessment }, s.config, 'unused');
-    assert.equal(second.outcome, 'completed'); assert.equal(s.calls.filter(a => a[1] === 'split').length, 2);
+    assert.equal(second.outcome, 'completed'); assert.equal(s.calls.filter(a => a[1] === 'split').length, 1);
     assert.equal(s.calls.filter(a => a[1] === 'send').length, 1); assert.equal(s.calls.filter(a => a[1] === 'create').length, 1);
   }
 });
@@ -131,7 +148,7 @@ for (const scenario of ['missing-turn', 'new-turn', 'wrong-task', 'wrong-thread'
   s.context.notifications = { prepare: async () => ({ context: c }), request: async (_, action) => {
     if (action === 'assess') { verified = true; return {}; }
     if (action !== 'collect') return {};
-    const submitted = s.calls.some(a => a[1] === 'send');
+    const submitted = s.calls.some(a => a[1] === 'create');
     if (scenario === 'reconnect' && submitted && !lost) { lost = true; throw Error('Connection lost'); }
     if (lost) recovered = true;
     return { ready: true, events: submitted ? [event] : [], activity: { supported: scenario !== 'missing-turn', completed: scenario !== 'new-turn', turnId: scenario === 'new-turn' ? 'new' : 'turn', fingerprint: 'stable' } };
@@ -144,15 +161,32 @@ for (const scenario of ['missing-turn', 'new-turn', 'wrong-task', 'wrong-thread'
   if (scenario === 'reconnect') { assert(recovered); assert(phases.some(p => p.phase === 'reconnecting')); }
   atomic(path.join(s.dir, 'control.json'), { id: 'manual', action: 'complete', nodeId: s.node.id, response: 'manually reviewed' });
   assert.equal((await pending).confirmedByUser, true);
-  assert.equal(s.calls.filter(a => a[1] === 'send').length, 1);
+  assert.equal(s.calls.filter(a => a[1] === 'send').length, 0);
 });
 
 test('ambiguous delivery never resends or closes the conversation, and persists receipt', async t => {
-  const s = setup(t, 'codex', { modify(args, result) { if (args[1] === 'send') { result.send.prompt.stages = ['input_accepted']; } return result; } });
-  await assert.rejects(runInOrca(s.context, s.config, 'prompt'), /送信結果が不明/);
+  const s = setup(t, 'codex', { modify(args, result) { if (args[1] === 'show') delete result.terminal.agentIdentity; return result; } });
+  s.context.startupTimeoutMs=10; const phases=[];
+  const pending=runInOrca(s.context,s.config,'prompt',{signal:s.controller.signal,onInteractive:p=>phases.push(p)});
+  const rejected=assert.rejects(pending,/停止/);
+  await until(()=>phases.some(p=>p.phase==='start-unconfirmed'));
+  assert.equal(phases.at(-1).promptSent,true); assert.equal(phases.at(-1).executionStarted,false);
+  await delay(30);
   const dispatch = read(path.join(s.dir, 'orca', s.node.id, 'dispatch.json'));
-  assert.equal(dispatch.status, 'uncertain'); assert.equal(dispatch.receipt.requestId, 'request-1');
-  assert.equal(s.calls.filter(a => a[1] === 'send').length, 1); assert(!s.calls.some(a => a[1] === 'close'));
+  assert.equal(dispatch.status, 'start-unconfirmed'); assert.equal(dispatch.receipt.delivery, 'startup-argument');
+  assert.equal(s.calls.filter(a => a[1] === 'send').length, 0); assert(!s.calls.some(a => a[1] === 'close'));
+  assert.equal(s.calls.filter(a=>a[1]==='create').length,1);
+  await assert.rejects(runInOrca(s.context,s.config,'prompt'),/起動済み/);
+  s.controller.abort(); await rejected;
+});
+test('process startup acknowledgement alone never confirms an AI turn and permits explicit review when idle',async t=>{
+  const s=setup(t), c={token:'token',startupPrompt:true}; s.context.startupTimeoutMs=10;
+  s.context.notifications={prepare:async()=>({context:c}),request:async()=>({ready:true,started:{token:c.token,pid:123},events:[]})};
+  const phases=[],pending=runInOrca(s.context,s.config,'prompt',{signal:s.controller.signal,onInteractive:p=>phases.push(p)});
+  await until(()=>phases.some(p=>p.phase==='start-unconfirmed'));
+  assert.equal(phases.at(-1).executionStarted,false); assert.equal(phases.at(-1).canComplete,true);
+  atomic(path.join(s.dir,'control.json'),{id:'manual',action:'complete',nodeId:s.node.id,response:'user checked'});
+  assert.equal((await pending).confirmedByUser,true); assert(!s.calls.some(a=>a[1]==='send'));
 });
 test('lost create acknowledgement is never replayed', async t => {
   const s = setup(t, 'codex', { modify(args, result) { if (args[1] === 'create') throw Error('lost acknowledgement'); return result; } });
@@ -171,13 +205,13 @@ test('cancel closes only the created terminal; a replaced incarnation is never c
     assert.equal(s.calls.filter(a => a[1] === 'close').length, replace ? 0 : 1);
   }
 });
-test('blocked startup does not receive a prompt; oversized prompts and uploads fail before creating a terminal', async t => {
+test('blocked startup retains its initial prompt; oversized prompts and uploads fail before creating a terminal', async t => {
   const s = setup(t, 'codex', { modify(args, result) { if (args[1] === 'wait') result.wait = { ...result.wait, satisfied: false, blockedReason: 'permission' }; return result; } });
   const phases = [], pending = runInOrca(s.context, s.config, 'prompt', { signal: s.controller.signal, onInteractive: v => phases.push(v) });
   const rejected = assert.rejects(pending, /停止/);
-  await until(() => phases.at(-1)?.phase === 'startup-blocked'); assert(!s.calls.some(a => a[1] === 'send')); s.controller.abort(); await rejected;
+  await until(() => phases.at(-1)?.phase === 'blocked'); assert(!s.calls.some(a => a[1] === 'send')); s.controller.abort(); await rejected;
   const fresh = setup(t);
-  await assert.rejects(runInOrca(fresh.context, fresh.config, 'x'.repeat(24000)), /24000/);
+  await assert.rejects(runInOrca(fresh.context, fresh.config, 'x'.repeat(24000)), /大きすぎ|24000/);
   await assert.rejects(runInOrca(fresh.context, { ...fresh.config, attachments: [{ id: 'upload' }] }, 'prompt'), /アップロード/);
   assert(!fresh.calls.some(a => a[1] === 'create'));
 });
@@ -193,6 +227,7 @@ test('target bootstrap preserves argv, environment, target cwd and MCP without s
   const actual = read(output); assert.equal(actual.cwd, s.dir); assert.equal(actual.literal, s.config.env.LITERAL);
   assert(actual.args.includes('node-model')); assert(actual.args.includes('high')); assert.deepEqual(actual.mcp.mcpServers, s.config.options.mcpServers);
   assert(input.prompt.includes('資料.txt'));
+  assert.equal(actual.args.at(-2),'--'); assert.equal(actual.args.at(-1),input.prompt);
 });
 test('HTTP discovery, detached worker, concurrency guard, focus and completion use Orca without a local cwd', async t => {
   const dir = temp(), previous = { ORCA_BIN: process.env.ORCA_BIN, ORCA_FAKE_FILE: process.env.ORCA_FAKE_FILE, ORCA_FAKE_RESULT: process.env.ORCA_FAKE_RESULT };
@@ -214,17 +249,22 @@ test('HTTP discovery, detached worker, concurrency guard, focus and completion u
   await until(() => app.store.state(run).nodes?.[b.id]?.interactive?.phase === 'ready');
   assert.equal(app.store.state(run).nodes[a.id].status, 'succeeded');
   assert.equal(app.store.state(run).nodes[b.id].machineId, 'local');
-  const sends = fs.readFileSync(process.env.ORCA_FAKE_FILE + '.calls', 'utf8').trim().split('\n').map(s => JSON.parse(s)).filter(args => args[1] === 'send');
-  assert.equal(sends.length, 2); assert(sends[1][sends[1].indexOf('--text') + 1].includes('done'));
+  const calls = fs.readFileSync(process.env.ORCA_FAKE_FILE + '.calls', 'utf8').trim().split('\n').map(s => JSON.parse(s));
+  assert.equal(calls.filter(a=>a[1]==='send').length,0);
+  const created=calls.filter(a=>a[1]==='create'); assert.equal(created.length,2);
+  const launch=JSON.parse(created[1][created[1].indexOf('--launch-spec')+1]);
+  const taskPrompt=JSON.parse(Buffer.from(launch.env.WORK_TREE_ORCA_INPUT,'base64').toString()).initialPrompt;
+  assert(taskPrompt.includes('.taskdesk/reports/'));
+  assert(!taskPrompt.includes('done'));
+  assert(taskPrompt.includes(a.title));
   assert.equal((await request('/api/runs/' + run.id + '/control', 'POST', { action: 'complete', nodeId: b.id, response: 'local done' })).status, 200);
   await until(() => app.store.state(run).status === 'succeeded');
   assert.equal(app.store.state(run).nodes[a.id].machineId, 'ssh:fixture');
   assert.equal(run.executionBackend, 'orca'); assert.equal(run.resultSuggestions, undefined);
+  assert.equal((await request('/api/machines/local', 'PUT', {name:'fixture',codexPath:path.join(__dirname,'fixtures/fake-cli.cjs'),claudePath:path.join(__dirname,'fixtures/fake-cli.cjs')})).status,200);
   const plan = await request('/api/generate', 'POST', { prompt: 'fixture plan', name: 'Created on g15', executionBackend: 'orca', orca: selection(1), timeoutMinutes: 37 });
   assert.equal(plan.status, 201, JSON.stringify(plan.value));
-  await until(() => Object.values(app.store.state(plan.value).nodes || {}).some(n => n.interactive?.phase === 'ready'));
-  const planNode = app.store.state(plan.value).currentNodeId;
-  await request('/api/runs/' + plan.value.id + '/control', 'POST', { action: 'complete', nodeId: planNode, response: JSON.stringify({ name: 'Plan', nodes: [{ id: 'task', kind: 'task', title: 'Task', prompt: 'fixture' }] }) });
+  assert.equal(plan.value.executionBackend,'direct');
   await until(() => app.store.state(plan.value).status === 'succeeded');
   const imported = await request('/api/runs/' + plan.value.id + '/import', 'POST', {});
   assert.equal(imported.status, 201, JSON.stringify(imported.value));
@@ -232,8 +272,9 @@ test('HTTP discovery, detached worker, concurrency guard, focus and completion u
   assert.equal(imported.value.executionBackend, 'orca'); assert.equal(imported.value.orca.hostId, 'ssh:fixture');
   const autoRun = await request('/api/trees/' + imported.value.id + '/run', 'POST', { next: 'task' });
   assert.equal(autoRun.status, 201, JSON.stringify(autoRun.value));
-  await until(() => app.store.state(autoRun.value).nodes[imported.value.nodes[0].id]?.interactive?.phase === 'ready');
-  await request('/api/runs/' + autoRun.value.id + '/control', 'POST', { action: 'complete', nodeId: imported.value.nodes[0].id, response: 'manual completion' });
+  const importedTask = imported.value.nodes.find(n=>n.kind==='task');
+  await until(() => app.store.state(autoRun.value).nodes[importedTask.id]?.interactive?.phase === 'ready');
+  await request('/api/runs/' + autoRun.value.id + '/control', 'POST', { action: 'complete', nodeId: importedTask.id, response: 'manual completion' });
   await until(() => app.store.state(autoRun.value).status === 'succeeded');
-  assert.equal(app.store.state(autoRun.value).nodes[imported.value.nodes[0].id].outcome, 'completed');
+  assert.equal(app.store.state(autoRun.value).nodes[importedTask.id].outcome, 'completed');
 });

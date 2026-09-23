@@ -16,7 +16,7 @@ async function api(url, method = 'GET', payload) {
 const current = () => draft;
 const latest = tid => data.runs.find(r => r.treeId === tid && r.kind === 'tree');
 const matchingRun = t => { const r = t && latest(t.id); return r?.treeRevision === t?.revision ? r : null; };
-const nodeRun = (t, nid) => data.runs.find(r => r.treeId === t.id && r.treeRevision === t.revision && ['tree', 'node'].includes(r.kind) && r.state.nodes?.[nid]);
+const nodeRun = (t, nid) => TaskDeskExecution.taskRun(t, data.runs, nid);
 const busy = () => draft && data.runs.find(r => r.treeId === draft.id && active.has(r.state.status));
 const machineName = mid => data.machines.find(m => m.id === mid)?.name || '未設定';
 const toolName = t => t === 'claude' ? 'Claude Code' : 'Codex';
@@ -26,9 +26,9 @@ function tasks(t) {
 }
 function suggested(t, state = {}) { return tasks(t).find(n => (!state[n.id] || state[n.id].status === 'pending') && n.dependsOn.every(d => ['succeeded', 'running'].includes(state[d]?.status))); }
 function nodeStatus(n, t, state) {
-  if (n.kind === 'task') return nodeRun(t, n.id)?.state.nodes[n.id]?.status || state?.nodes?.[n.id]?.status || 'pending';
+  if (n.kind === 'task') return nodeRun(t, n.id)?.state.nodes[n.id]?.status || 'pending';
   const desc = descendants(n.id, t).filter(d => t.nodes.find(x => x.id === d)?.kind === 'task');
-  const statuses = desc.map(id => nodeRun(t, id)?.state.nodes[id]?.status || state?.nodes?.[id]?.status || 'pending');
+  const statuses = desc.map(id => nodeRun(t, id)?.state.nodes[id]?.status || 'pending');
   if (statuses.length && statuses.every(s => s === 'succeeded')) return 'succeeded';
   for (const s of ['failed', 'running', 'review', 'cancelled']) if (statuses.includes(s)) return s;
   return 'pending';
@@ -54,6 +54,7 @@ function renderSidebar() {
   }).join('') || '<p class="muted" style="padding:15px">ツリーがありません</p>';
 
 }
+const interactiveReady = value => ['ready', 'confirmation'].includes(value?.phase) || value?.phase === 'start-unconfirmed' && value.canComplete === true;
 function interactiveLabel(value) {
   const backend = value.backend === 'orca' ? 'Orca' : 'herdr';
   if (value.phase === 'confirmation') return value.message || '応答終了・結果の確認待ち';
@@ -63,7 +64,7 @@ function interactiveLabel(value) {
 }
 function showComplete(runId) {
   const run = data.runs.find(r => r.id === runId), nid = run?.state.currentNodeId;
-  if (!['ready', 'confirmation'].includes(run?.state.nodes?.[nid]?.interactive?.phase)) throw new Error('Agent が入力待ちになるまでお待ちください');
+  if (!interactiveReady(run?.state.nodes?.[nid]?.interactive)) throw new Error('Agent が入力待ちになるまでお待ちください');
   modalKind = 'complete';
   const hint = run.executionBackend === 'orca' ? '完了なら後続 TASK へ進みます。エラー・想定外結果なら後続を止めます。Orca の対話を確認し、必要ならツリーを編集してください。' : '完了なら後続 TASK へ進みます。エラー・想定外結果なら後続を止め、TASK の下に編集案を表示します。';
   modal('タスクの結果を記録', esc(draft?.nodes.find(n => n.id === nid)?.title || ''), field('結果ラベル', '<select id="complete-outcome">' + options([['completed','完了'],['error','エラー'],['unexpected','想定外結果']], 'completed') + '</select>') + field('結果の要約', '<textarea id="complete-response" maxlength="60000" placeholder="実施内容・成果物・検証結果を入力してください"></textarea>', hint), '<button class="button close-modal">戻る</button><button class="button primary" data-modal-action="complete" data-run="' + runId + '" data-node-id="' + nid + '">結果を記録</button>');
@@ -83,12 +84,13 @@ function renderHeader() {
   let controls = '<button class="button primary" data-action="start" ' + (running || editingTree || !tasks(t).length ? 'disabled' : '') + '>ツリーを実行</button>' +
     '<button class="button" data-action="run-wp" ' + (running || nodeSubmitting || editingTree || !next.wp ? 'disabled' : '') + '>次WPを実行</button>' +
     '<button class="button" data-action="run-selected" ' + (running || nodeSubmitting || editingTree || !next.task ? 'disabled' : '') + '>次TASKを実行</button>' +
-    '<button class="button" data-action="edit-tree" ' + (running ? 'disabled' : '') + '>' + (editingTree ? '編集を完了' : 'ツリー編集') + '</button>';
+    '<button class="button" data-action="edit-tree" ' + (running ? 'disabled' : '') + '>' + (editingTree ? '編集を完了' : 'ツリー編集') + '</button>' +
+    '<button class="button" data-action="settings" ' + (running ? 'disabled' : '') + '>設定編集</button>';
   if (running) controls += '<div class="running-controls">' + statusBadge(running.state.status) +
     '<button class="text-button" data-control="' + (running.state.status === 'paused' ? 'resume' : 'pause') + '" data-run="' + running.id + '">' + (running.state.status === 'paused' ? '再開' : '一時停止') + '</button><button class="text-button danger-text" data-control="stop" data-run="' + running.id + '">停止</button></div>';
   else if (r && ['failed', 'cancelled', 'interrupted'].includes(r.state.status)) controls += '<button class="text-button" data-action="resume-tree">続きから</button>';
   const interactive = running?.state.nodes?.[running.state.currentNodeId]?.interactive;
-  if (interactive) controls += '<div class="interactive-controls"><span>' + esc(interactiveLabel(interactive)) + '</span>' + orcaFocusButton(running, running.state.currentNodeId) + '<button class="button small primary" data-complete-run="' + running.id + '" ' + (!['ready', 'confirmation'].includes(interactive.phase) ? 'disabled' : '') + '>結果を記録</button></div>';
+  if (interactive) controls += '<div class="interactive-controls"><span>' + esc(interactiveLabel(interactive)) + '</span>' + orcaFocusButton(running, running.state.currentNodeId) + '<button class="button small primary" data-complete-run="' + running.id + '" ' + (!interactiveReady(interactive) ? 'disabled' : '') + '>結果を記録</button></div>';
   $('#project-header').innerHTML = '<div class="project-heading"><p class="eyebrow">TASK TREE</p>' + (editingTree ? '<input class="tree-title-input" data-tree-name value="' + esc(t.name) + '" maxlength="160" aria-label="ツリー名">' : '<h1>' + esc(t.name) + '</h1>') + '</div><div class="project-actions">' + controls + '</div>';
   $('#next-execution').innerHTML = '<span>次WP：<strong>' + esc(next.wp?.title || (next.complete ? 'すべて完了' : next.task ? 'WP なし' : '依存先の完了待ち')) + '</strong></span><span>次TASK：<strong>' + esc(next.task?.title || (next.complete ? 'すべて完了' : '実行可能な TASK なし')) + '</strong></span>';
   $('#dirty-label').hidden = !dirty; $('#save-tree').disabled = !dirty || Boolean(running);
@@ -109,7 +111,8 @@ function renderCanvas() {
   }
   function editName(n) { return '<button class="drag-handle" draggable="true" data-drag-id="' + n.id + '" aria-label="' + esc(n.title) + 'を移動">⠿</button><input data-inline-field="title" data-id="' + n.id + '" value="' + esc(n.title) + '" maxlength="200" aria-label="ノード名"><button class="remove-node" data-remove-node="' + n.id + '" aria-label="' + esc(n.title) + 'を削除">×</button>'; }
   function taskCard(n) {
-    const badge = outcomeBadge(n,t);
+    const scheduled = busy()?.state.nodes?.[n.id]?.status === 'pending';
+    const badge = (scheduled ? '<span class="status-badge scheduled">実行予定</span>' : '') + outcomeBadge(n,t);
     const card = editingTree ? '<article class="tree-node editable" data-drop-node="' + n.id + '"><div class="inline-name"><span class="task-index">' + number.get(n.id) + '</span>' + editName(n) + '</div>' + (badge ? '<div class="task-outcome">' + badge + '</div>' : '') + editDetails(n) + '</article>' :
       '<button class="tree-node ' + (nodeId === n.id ? 'selected' : '') + '" data-node="' + n.id + '" aria-label="' + esc(n.title + '、' + labels[nodeStatus(n,t,state)]) + '"><span class="task-index">' + number.get(n.id) + '</span><strong>' + esc(n.title) + '</strong>' + (badge || statusBadge(nodeStatus(n,t,state))) + '</button>';
     return '<div class="task-cell">' + card + '<div data-task-proposals="' + n.id + '"></div></div>';
@@ -145,7 +148,15 @@ function openNodePanel() {
 function nodeError(message) { const box = $('#node-error'); box.textContent = message; box.hidden = false; }
 function renderNodeFooter() {
   const t = draft, n = draft?.nodes.find(n => n.id === nodeId), running = busy();
-  const result = running?.state.nodes?.[running.state.currentNodeId], ready = ['ready', 'confirmation'].includes(result?.interactive?.phase);
+  const result = running?.state.nodes?.[running.state.currentNodeId], ready = interactiveReady(result?.interactive);
+  if (tab === 'result' && n?.kind === 'task') {
+    const run = nodeRun(t,n.id), own = run?.state.nodes[n.id];
+    const generating = (data.proposals || []).some(p=>p.treeId===t.id && p.status==='generating');
+    const canJudge = own && (own.status === 'review' || !running && own.status !== 'pending' || running?.state.currentNodeId === n.id && ready);
+    $('#node-footer').innerHTML = orcaFocusButton(run,n.id) + '<button class="button" data-add-followup ' + (running || nodeSubmitting || addingTask || generating ? 'disabled' : '') + '>タスク追加</button>' +
+      '<button class="button primary" data-judge="' + (run?.id || '') + '" data-judge-node="' + n.id + '" ' + (!canJudge ? 'disabled' : '') + '>完了判定</button><button class="button" data-close-node>閉じる</button>';
+    return;
+  }
   $('#node-footer').innerHTML = '<small role="status">' + (nodeSubmitting ? '起動を準備しています…' : running ? (running.executionBackend === 'orca' ? 'Orca で対話を続けられます' : '実行中です') : dirty ? '未保存の変更あり' : '設定は保存済み') + '</small>' + orcaFocusButton(running || (n && nodeRun(t, n.id)), n?.id) +
     (['herdr', 'orca'].includes(running?.executionBackend) ? '<button class="button primary" data-complete-run="' + running.id + '" ' + (!ready ? 'disabled' : '') + '>結果を記録</button>' : tab === 'node' && n ? '<button class="button primary" data-action="run-node" ' + (running || nodeSubmitting ? 'disabled' : '') + '>タスク実行</button>' : '') +
     '<button class="button" data-close-node>閉じる</button>';
@@ -185,7 +196,7 @@ function renderExecutionTarget() {
   out.textContent = toolName(tool) + ' · ' + (c.model || 'CLI の既定モデル') + ' · Thinking: ' + (c.effort || 'CLI の既定値') +
     (c.mode !== 'task' ? ' · ' + (c.mode === 'plan' ? '計画モード' : 'ゴールモード') : '') +
     (draft.executionBackend === 'orca' ? '\nOrca / ' + ((n.orca || draft.orca)?.hostId || '未設定') + ' / ' + ((n.orca || draft.orca)?.path || 'ワークツリー未設定') : draft.executionBackend === 'herdr' ? '\nherdr / ' + draft.name + ' / ' + n.title : '');
-  if (draft.executionBackend === 'orca') out.textContent += '\n' + (tool !== 'codex' || o?.notificationMode === 'manual' || o?.hostId !== 'local' && !o?.notificationMachineId ? '手動記録モード' : '終了通知 → AI による完了条件の判定');
+  if (draft.executionBackend === 'orca') out.textContent += '\n' + (tool !== 'codex' ? '手動記録モード' : o?.notificationMode === 'manual' || o?.hostId !== 'local' && !o?.notificationMachineId ? 'Orcaの画面 → 分割ペインで完了条件を判定' : '終了通知 → AI による完了条件の判定');
 }
 const followupPrompts = new Map();
 let addingTask = false;
@@ -230,18 +241,21 @@ function renderInspector() {
     const insertion = (data.proposals || []).find(p=>p.treeId===t.id && p.anchorId===n.id && p.scope==='insert');
     const generating = (data.proposals || []).some(p=>p.treeId===t.id && p.status==='generating');
     const run = nodeRun(t, n.id) || data.runs.find(r => r.treeId === t.id && ['tree', 'node'].includes(r.kind) && r.state.nodes?.[n.id]?.response !== undefined);
-    const result = run?.state.nodes?.[n.id], old = run && run.treeRevision !== t.revision;
+    const result = run?.state.nodes?.[n.id], old = run && !TaskDeskExecution.taskMatches(t, run, n.id);
     const outcome = Object.hasOwn(outcomeNames, result?.outcome) ? result.outcome : 'pending';
     target.innerHTML = '<div class="task-result-header"><span class="outcome-badge result-outcome ' + outcome + '" role="status" aria-label="完了ラベル：' + esc(outcomeNames[outcome] || '未判定') + '"><span aria-hidden="true">' + ({completed:'✓',needs_review:'!',error:'×',unexpected:'!',pending:'○'}[outcome]) + '</span> ' + esc(outcomeNames[outcome] || '未判定') + '</span>' +
-      (n.kind === 'task' ? '<button class="button primary" data-add-followup ' + (busy() || nodeSubmitting || addingTask || generating ? 'disabled' : '') + '>タスク追加</button>' : '') + '</div>' +
+      '</div>' +
       (insertion ? '<p role="status">' + esc(insertion.status==='generating' ? 'AI がバックグラウンドで生成中です。完了すると自動追加します…' : insertion.status==='applied' ? (insertion.nodes?.length || 0) + ' 件の TASK を追加しました：' + insertion.summary : insertion.error || '追加は完了していません') + '</p>' : '') +
       (old ? '<p class="muted">前のツリー設定で実行した結果です。</p>' : '') +
       (result?.confirmedByUser ? '<p class="muted">人が完了を承認済み</p>' : '') +
+      (result?.manualLabel ? '<p class="muted">人による判定：' + esc(outcomeNames[result.manualLabel.outcome]) + ' · ' + esc(result.manualLabel.note || '') + '</p>' : '') +
+      (result?.resultStale ? '<p role="status">修正中・修正後の結果待ち。以下の既存結果は修正前のものです。</p>' : '') +
+      (result?.report?.path ? '<h3>成果報告書</h3><pre class="result-text">' + esc(result.report.path) + '</pre><p>' + esc(result.report.status === 'reported' ? 'AIが保存を報告（ファイルの実在は未検証）' : '保存先を指定済み（保存未確認）') + '</p>' : '') +
       '<h3>実行結果内容</h3><pre class="result-text" id="work-result-text">' + esc(workResultText(result) || '実行結果はまだありません') + '</pre>' +
       '<h3>完了条件判定結果内容</h3><pre class="result-text" id="assessment-result-text">' + esc(result?.assessment?.detail || result?.assessment?.response || '完了条件の判定結果はまだありません') + '</pre>' +
       (n.kind === 'task' ? field('タスク追加プロンプト（追加したいタスク一覧・箇条書き）', '<textarea id="followup-prompt" class="prompt" maxlength="12000" ' + (addingTask || generating ? 'disabled' : '') + ' placeholder="- エラーの原因を調査する&#10;- 修正を実装する&#10;- 次の TASK に必要な動作を検証する">' + esc((followupPrompts.get(followupKey()) ?? insertion?.request) || '') + '</textarea>') + '<p class="muted">AI が現在の TASK・実行結果・次の TASK を踏まえ、間を補完する TASK を生成し、同じ WP 内に自動追加します。各 TASK にプロンプトと完了条件を設定します。生成には AI の利用枠を使用します。' + (busy() ? '実行終了後に追加できます。' : '') + '</p>' : '') +
-      (!old && result?.status === 'review' ? '<button class="button primary" data-control="approve" data-run="' + run.id + '" data-approve-node="' + n.id + '">結果を確認し、完了として次へ進む</button>' : '') +
-      (!old && result?.canReassess && (result.status === 'review' || !busy()) ? '<button class="button" data-reassess="' + run.id + '" data-reassess-node="' + n.id + '">完了条件を再判定</button>' : '') +
+      (!old && result?.status === 'review' && run.executionBackend === 'orca' ? '<button class="button" data-revise="' + run.id + '" data-revise-node="' + n.id + '">Orcaで修正する</button>' : '') +
+      (result?.resultHistory?.length ? '<details><summary>修正前の結果履歴（' + result.resultHistory.length + '件）</summary>' + result.resultHistory.map(h => '<h3>' + esc(h.savedAt) + '</h3><pre class="result-text">' + esc(h.workResponse || h.response) + '</pre><pre class="result-text">' + esc(h.assessment?.detail || '') + '</pre>').join('') + '</details>' : '') +
       (result?.error ? '<div class="error-box">' + esc(result.error) + '</div>' : '');
     return;
   }
@@ -279,6 +293,7 @@ function showNew() {
 }
 function executionSettings(t) {
   return field('ツリー名', '<input id="setting-name" value="' + esc(t.name) + '" maxlength="160">') + field('説明', '<textarea id="setting-description">' + esc(t.description) + '</textarea>') +
+    field('TASK の完了判定と次TASKへの進行', '<select id="setting-completion-mode">' + options([['manual','自分で確認して次TASKへ進む'],['ai','AI判断で次TASKへ自動で進む']], t.completionMode || 'ai') + '</select>', '自動進行は選択した実行範囲内です。要確認・エラーでは停止します。Codexでは通知用SSH接続なしでもOrcaの分割ペインで自動判定できます。') +
     field('実行先', '<select id="setting-backend">' + options([['direct', '通常実行'], ['herdr', 'herdr の対話 Agent'], ['orca', 'Orca の対話 Agent']], t.executionBackend || 'direct') + '</select>') +
     '<div id="orca-tree-settings">' + orcaPicker(t.orca, 'tree') + '<p class="muted">TaskDesk と Orca を同じ PC・ユーザーで起動してください。タスクごとに専用タブを作り、Orca のホスト上で AI ツールを実行します。実行先には Node.js と AI CLI が必要です。</p></div>' +
     field('herdr セッション', '<input id="setting-herdr-session" value="' + esc(t.herdrSession || 'default') + '">', 'Spaces にツリー名、Agents に実行ノード名を表示します。') +
@@ -290,7 +305,7 @@ function executionSettings(t) {
 }
 function readExecutionSettings() {
   const backend = $('#setting-backend').value;
-  return { name: $('#setting-name').value.trim(), description: $('#setting-description').value, executionBackend: backend, herdrSession: $('#setting-herdr-session').value.trim() || 'default', tool: $('#setting-tool').value, machineId: $('#setting-machine').value, runnerId: backend === 'orca' ? 'local' : $('#setting-runner').value, cwd: $('#setting-cwd').value.trim(), timeoutMinutes: Number($('#setting-timeout').value), ...(backend === 'orca' ? { orca: readOrcaPicker('tree') } : {}), ...CliUI.read() };
+  return { completionMode: $('#setting-completion-mode').value, name: $('#setting-name').value.trim(), description: $('#setting-description').value, executionBackend: backend, herdrSession: $('#setting-herdr-session').value.trim() || 'default', tool: $('#setting-tool').value, machineId: $('#setting-machine').value, runnerId: backend === 'orca' ? 'local' : $('#setting-runner').value, cwd: $('#setting-cwd').value.trim(), timeoutMinutes: Number($('#setting-timeout').value), ...(backend === 'orca' ? { orca: readOrcaPicker('tree') } : {}), ...CliUI.read() };
 }
 function showSettings() {
   if (!draft) return; modalKind = 'settings'; const t = draft;
@@ -338,7 +353,7 @@ async function modalAction(action, button) {
       const prompt = [['目的', brief.purpose], ['現状', brief.current], ['想定タスクフロー', brief.flow], ['完了条件', brief.criteria], ['制約', brief.constraints]].map(([k,v]) => k + '：\n' + v).join('\n\n');
       const created = await api('/api/generate', 'POST', { ...readExecutionSettings(), brief, prompt });
       pendingPlanId = created.id; localStorage.setItem('work-tree:pending-plan', created.id);
-      button.textContent = '作成中…'; toast('ツリーを作成しています'); await refresh();
+      button.textContent = '作成中…'; toast('AI がバックグラウンドでツリーを作成しています'); await refresh();
     }
     if (action === 'complete') {
       const response = $('#complete-response').value.trim();
@@ -432,6 +447,23 @@ document.addEventListener('click', async event => {
   try {
     if (b.classList.contains('close-modal')) return closeModal();
     if (b.dataset.completeRun) return showComplete(b.dataset.completeRun);
+    if (b.dataset.judge) {
+      const run = data.runs.find(r=>r.id===b.dataset.judge), result = run?.state.nodes[b.dataset.judgeNode];
+      if (!result) throw Error('実行結果が見つかりません');
+      if (active.has(run.state.status) && result.status !== 'review') return showComplete(run.id);
+      modalKind = 'judgement';
+      modal('完了判定', draft.completionMode === 'manual' ? '内容を確認して完了を承認すると、実行範囲内の次TASKへ進みます。' : 'AIの判定が合格すると、実行範囲内の次TASKへ進みます。',
+        '<h3>完了条件</h3><pre class="result-text">' + esc(draft.nodes.find(n=>n.id===b.dataset.judgeNode)?.criteria || '未設定') + '</pre>' + field('自分で付与するラベル','<select id="judgement-label">'+options([['completed','完了'],['needs_review','要確認'],['error','エラー'],['unexpected','想定外']],result.outcome || 'needs_review')+'</select>') + field('判定メモ（任意）','<textarea id="judgement-note" maxlength="6000"></textarea>') + '<p>最新の成果物を確認したうえで保存してください。AIの判定結果は残し、人の判断として記録します。完了以外では後続TASKを止めます。</p>',
+        '<button class="button close-modal">戻る</button>' +
+        ((result.canReassess || run.state.offlineReview) ? '<button class="button" data-reassess="' + run.id + '" data-reassess-node="' + b.dataset.judgeNode + '">最新結果を取得して判定</button>' : '') +
+        '<button class="button primary" data-save-label="'+run.id+'" data-label-node="'+b.dataset.judgeNode+'">ラベルを保存</button>');
+      return;
+    }
+    if (b.dataset.saveLabel) {
+      b.disabled=true;
+      try { const saved=await api('/api/runs/'+b.dataset.saveLabel+'/label','POST',{nodeId:b.dataset.labelNode,outcome:$('#judgement-label').value,note:$('#judgement-note').value}); closeModal();toast(saved.message || '人による判定ラベルを保存しました');await refresh(); } finally {b.disabled=false;}
+      return;
+    }
     if (b.dataset.nodeSettings) { nodeId = b.dataset.nodeSettings; tab = 'node'; return openNodePanel(); }
     if (b.dataset.addTo) { nodeId = b.dataset.addTo; return await action('add-child'); }
     if (b.dataset.removeNode) { nodeId = b.dataset.removeNode; return await action('delete-node'); }
@@ -444,16 +476,21 @@ document.addEventListener('click', async event => {
     if (b.dataset.action) return await action(b.dataset.action);
     if (b.dataset.modalAction) return await modalAction(b.dataset.modalAction, b);
     if (b.dataset.log || b.dataset.logRefresh) return await showLog(b.dataset.log || b.dataset.logRefresh);
+    if (b.dataset.revise) {
+      b.disabled = true;
+      try { await api('/api/runs/' + b.dataset.revise + '/control', 'POST', { action:'revise', nodeId:b.dataset.reviseNode }); await api('/api/orca/focus', 'POST', {runId:b.dataset.revise,nodeId:b.dataset.reviseNode}); toast('同じ作業ペインで修正してください。終了後に画面下部の「完了判定」を押してください'); await refresh(); } finally { b.disabled = false; }
+      return;
+    }
     if (b.dataset.reassess) {
       b.disabled = true;
-      try { await api('/api/runs/' + b.dataset.reassess + '/reassess', 'POST', { nodeId: b.dataset.reassessNode }); toast('再判定を開始しました'); await refresh(); } finally { b.disabled = false; }
+      try { await api('/api/runs/' + b.dataset.reassess + '/reassess', 'POST', { nodeId: b.dataset.reassessNode }); closeModal(); toast('更新版の結果報告と完了判定を開始しました'); await refresh(); } finally { b.disabled = false; }
       return;
     }
     if (b.hasAttribute('data-add-followup')) return await addFollowupTask();
     if (b.dataset.control) {
       if (b.dataset.control === 'stop' && !confirm('この実行を停止しますか？ 実行済みの変更は保持されます。')) return;
       b.disabled = true;
-      try { await api('/api/runs/' + b.dataset.run + '/control', 'POST', { action: b.dataset.control, nodeId: b.dataset.approveNode }); toast(b.dataset.control === 'pause' ? '現在のタスク終了後に一時停止します' : '操作を送信しました'); await refresh(); } finally { b.disabled = false; }
+      try { await api('/api/runs/' + b.dataset.run + '/control', 'POST', { action: b.dataset.control, nodeId: b.dataset.approveNode }); if (modalKind === 'judgement') closeModal(); toast(b.dataset.control === 'pause' ? '現在のタスク終了後に一時停止します' : '操作を送信しました'); await refresh(); } finally { b.disabled = false; }
     }
     if (b.dataset.editMachine) return editMachine(b.dataset.editMachine);
     if (b.dataset.deleteMachine && confirm('この SSH マシンを削除しますか？')) { await api('/api/machines/' + b.dataset.deleteMachine, 'DELETE'); await refresh(); showMachines(); }
@@ -507,6 +544,7 @@ $('#result-tab').onclick = () => {
 };
 $('#node-tab').onclick = () => { if (invalidEnvNodeId) return; tab = 'node'; renderInspector(); }; $('#history-tab').onclick = () => { if (invalidEnvNodeId) return toast('環境変数の JSON を修正してください', true); tab = 'history'; renderInspector(); };
 document.addEventListener('keydown', event => {
+  if (event.isComposing || event.keyCode === 229) return;
   if ((event.ctrlKey || event.metaKey) && event.key === 's') { event.preventDefault(); save().catch(e => toast(e.message, true)); }
   if (event.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName) && !$('#modal').open && !$('#node-dialog').open) { event.preventDefault(); $('#search').focus(); }
 });
@@ -560,11 +598,10 @@ async function refresh() {
     if (pendingPlanId) {
       void settlePlan();
       const plan = data.runs.find(r => r.id === pendingPlanId), nid = plan?.state.currentNodeId;
-      if (modalKind === 'generate' && plan?.executionBackend === 'orca') {
+      if (modalKind === 'generate' && plan) {
         let out = $('#creation-progress');
         if (!out) { out = document.createElement('div'); out.id = 'creation-progress'; $('#modal-content').append(out); }
-        out.innerHTML = '<p>Orca で計画を作成中です。</p>' + orcaFocusButton(plan, nid);
-        if (['ready', 'confirmation'].includes(plan.state.nodes?.[nid]?.interactive?.phase)) out.innerHTML += '<button class="button small" data-complete-run="' + esc(plan.id) + '">計画 JSON を記録</button>';
+        out.innerHTML = '<p role="status">AI がバックグラウンドで計画を作成中です。完了するとツリーを取り込みます。</p>';
       }
     }
     if (!changed) return;
@@ -574,7 +611,11 @@ async function refresh() {
     renderSidebar(); if (!editingTree || !$('#project-header').contains(document.activeElement)) renderHeader();
     // Keep a focused editor stable while polling live execution state.
     const focusedEditor = $('#inspector-content').contains(document.activeElement) && document.activeElement.matches('input:enabled, textarea:enabled, select:enabled');
-    if (!dirty && !editingTree && !$('#modal').open && (!focusedEditor || busy())) { renderCanvas(); renderInspector(); }
+    // Do not replace a focused input, including an IME composition, on a live update.
+    // Apply execution locks separately instead of rebuilding the form.
+    const nodeFields = $('#node-fields');
+    if (nodeFields) nodeFields.disabled = Boolean(busy() || nodeSubmitting);
+    if (!dirty && !editingTree && !$('#modal').open && !focusedEditor) { renderCanvas(); renderInspector(); }
   } catch (e) { $('#connection-label').textContent = '再接続を待っています'; }
   finally { refreshing = false; }
 }

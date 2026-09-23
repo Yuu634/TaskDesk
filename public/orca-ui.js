@@ -14,8 +14,8 @@ function orcaPicker(value, scope, inherited = false) {
     pick('hostId', 'Orca 実行ホスト', catalog.hosts.map(h => [h.id, h.name + (h.kind !== 'local' && !h.connected ? '（未接続）' : '')])) +
     pick('worktreeId', 'Orca ワークツリー', worktrees.map(w => [w.id, (w.displayName || w.branch) + ' · ' + w.path])) +
     field('AI ツールの実行パス（任意）', '<input data-orca-key="executable" value="' + esc(v.executable || '') + '" placeholder="空欄なら選択した codex / claude を PATH から起動" ' + (inherited ? 'disabled' : '') + '>') +
-    pick('notificationMode', 'Codex の終了通知', [['notify', '終了通知を回収する'], ['manual', '手動で結果を記録する']]) +
-    (v.hostId && v.hostId !== 'local' ? pick('notificationMachineId', '通知回収に使う SSH 接続', data.machines.filter(m => m.type === 'ssh').map(m => [m.id, m.name + ' · ' + m.host])) + '<p class="muted">Orca と同じホスト・ユーザーの接続を「設定 → マシンと AI ツール」で登録してください。未設定の場合は手動記録になります。</p>' : '<p class="muted">ローカルの Codex 終了通知を回収します。自動完了は各 TASK の検証設定で有効にできます。</p>') +
+    pick('notificationMode', 'Codex の結果回収', [['notify', '終了通知を優先する'], ['manual', 'Orcaの画面から回収する']]) +
+    '<p class="muted">Orcaの既存接続を使って、分割ペインで完了条件を自動判定できます。</p>' +
     '<p class="muted">' + esc(selected?.path || v.path || 'Orca に登録済みのワークツリーを選択します。') + '</p>' +
     (orcaError ? '<p class="error-box" role="alert">' + esc(orcaError) + '</p>' : '') +
     '<button type="button" class="button small" data-orca-refresh ' + (orcaLoading ? 'disabled' : '') + '>' + (orcaLoading ? 'Orca を確認中…' : 'Orca から一覧を更新') + '</button></div>';
